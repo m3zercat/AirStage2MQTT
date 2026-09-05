@@ -1,0 +1,37 @@
+name: airstage2mqtt
+
+services:
+  bridge:
+    image: ${A2M_IMAGE:-airstage2mqtt:local}
+    build:
+      context: .
+      target: runtime
+    container_name: airstage2mqtt
+    restart: unless-stopped
+    init: true
+    user: "1000:1000"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    env_file:
+      - .env
+    volumes:
+      - ./config.yaml:/config/config.yaml:ro
+      - bridge-data:/data
+      # For file-based MQTT credentials, uncomment this mount and set
+      # A2M_MQTT_PASSWORD_FILE=/run/secrets/mqtt_password in .env:
+      # - ./secrets/mqtt_password:/run/secrets/mqtt_password:ro
+    tmpfs:
+      - /tmp:size=8m,mode=1777,noexec,nosuid
+    healthcheck:
+      test: ["CMD", "python", "-m", "airstage2mqtt", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+volumes:
+  bridge-data:
+

@@ -1,0 +1,25 @@
+polling:
+  interval_seconds: 10
+  timeout_seconds: 20
+  retries: 5
+  offline_after_failures: 2
+  reconnect_min_seconds: 1
+  reconnect_max_seconds: 30
+
+homeassistant:
+  enabled: true
+  discovery_prefix: homeassistant
+
+units:
+  - name: living_room
+    mac: "E8:FB:1C:00:00:00"
+    ip: "192.168.1.40"
+    use_https: false
+    turn_on_before_set_temperature: false
+
+  # - name: bedroom
+  #   mac: "E8:FB:1C:00:00:01"
+  #   ip: "192.168.1.41"
+  #   use_https: false
+  #   turn_on_before_set_temperature: true
+

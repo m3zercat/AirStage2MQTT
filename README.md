@@ -1,3 +1,263 @@
 # AirStage2MQTT
 
-Welcome
+AirStage2MQTT is a local-only bridge between Fujitsu AirStage Wi-Fi air conditioners and
+MQTT. It polls each configured unit over the LAN, publishes normalized JSON state, accepts
+Zigbee2MQTT-style commands, and can optionally publish Home Assistant MQTT discovery.
+
+Fujitsu cloud accounts and APIs are not used. Home Assistant is optional: any MQTT client can
+monitor or control the units.
+
+## Requirements
+
+- A Linux Docker host, or Python 3.12 or newer for direct execution.
+- An MQTT 3.1.1/5 broker such as Mosquitto.
+- Fujitsu AirStage units supported by the local API in `pyairstage` 3.2.2.
+- A DHCP reservation or static IPv4 address for every unit.
+- The unit MAC address. Its separators are removed to form the Fujitsu device ID.
+
+The container must be able to route to the MQTT broker and every configured A/C address.
+Automatic IP discovery is not currently supported.
+
+## Quick start with Docker Compose
+
+1. Create local configuration from the committed examples:
+
+   ```sh
+   cp .env.example .env
+   cp config.example.yaml config.yaml
+   ```
+
+2. Edit `.env` with the MQTT connection and edit `config.yaml` with the real A/C addresses and
+   MAC addresses. Both files are ignored by Git.
+
+3. Build and start the service:
+
+   ```sh
+   docker compose up -d --build
+   ```
+
+4. Follow the logs and inspect health:
+
+   ```sh
+   docker compose logs -f bridge
+   docker inspect --format '{{json .State.Health}}' airstage2mqtt
+   ```
+
+To stop the bridge without deleting its Home Assistant discovery index:
+
+```sh
+docker compose down
+```
+
+## Configuration
+
+### Environment variables
+
+Docker Compose loads `.env`. Environment variables override the corresponding `mqtt` values in
+YAML; the unit list is always read from YAML.
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `A2M_IMAGE` | `airstage2mqtt:local` | Image built or run by Compose |
+| `A2M_CONFIG` | `/config/config.yaml` | Configuration path inside the container |
+| `A2M_DATA_DIR` | `/data` | Discovery-index directory |
+| `A2M_LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL` |
+| `A2M_MQTT_HOST` | required | MQTT hostname or address |
+| `A2M_MQTT_PORT` | `1883` | MQTT TCP port |
+| `A2M_MQTT_USERNAME` | unset | MQTT username |
+| `A2M_MQTT_PASSWORD` | unset | MQTT password; convenient but less private than a file |
+| `A2M_MQTT_PASSWORD_FILE` | unset | File containing the MQTT password; takes precedence |
+| `A2M_MQTT_TLS` | `false` | Enable MQTT TLS |
+| `A2M_MQTT_TLS_CA_FILE` | system CAs | Optional CA bundle for MQTT TLS |
+| `A2M_MQTT_TLS_INSECURE` | `false` | Disable MQTT certificate verification; discouraged |
+| `A2M_BASE_TOPIC` | `airstage2mqtt` | MQTT topic prefix; wildcards are rejected |
+
+For file-based credentials, create `secrets/mqtt_password`, uncomment the password-file volume
+in `compose.yml`, remove `A2M_MQTT_PASSWORD`, and set:
+
+```dotenv
+A2M_MQTT_PASSWORD_FILE=/run/secrets/mqtt_password
+```
+
+Do not commit `.env`, `config.yaml`, or files under `secrets/`.
+
+### YAML configuration
+
+```yaml
+polling:
+  interval_seconds: 10
+  timeout_seconds: 20
+  retries: 5
+  offline_after_failures: 2
+  reconnect_min_seconds: 1
+  reconnect_max_seconds: 30
+
+homeassistant:
+  enabled: true
+  discovery_prefix: homeassistant
+
+units:
+  - name: living_room
+    mac: "E8:FB:1C:00:00:00"
+    ip: "192.168.1.40"
+    use_https: false
+    turn_on_before_set_temperature: false
+
+  - name: bedroom
+    mac: "E8:FB:1C:00:00:01"
+    ip: "192.168.1.41"
+    use_https: false
+    turn_on_before_set_temperature: true
+```
+
+Unit names may contain letters, digits, `_`, and `-`; they become part of the MQTT topic. Names,
+MAC addresses, and IP addresses must be unique. `turn_on_before_set_temperature` controls whether
+a temperature command automatically powers on an off unit or is rejected.
+
+The following MQTT settings may alternatively be placed under a `mqtt:` YAML mapping: `host`,
+`port`, `username`, `password`, `password_file`, `tls`, `tls_ca_file`, `tls_insecure`,
+`client_id`, `base_topic`, and `qos`.
+
+`use_https` controls the local A/C connection, not MQTT. `pyairstage` disables certificate
+validation for local HTTPS because the unit certificate does not match its IP address. Keep the
+A/C network trusted and isolated.
+
+## MQTT interface
+
+For a unit named `living_room` and the default base topic:
+
+| Topic | Direction | Retained | Purpose |
+| --- | --- | --- | --- |
+| `airstage2mqtt/living_room` | bridge → broker | yes | Complete normalized state |
+| `airstage2mqtt/living_room/set` | client → bridge | no | Partial JSON command |
+| `airstage2mqtt/living_room/set/<property>` | client → bridge | no | Single-property command |
+| `airstage2mqtt/living_room/get` | client → bridge | no | Request an immediate refresh |
+| `airstage2mqtt/living_room/availability` | bridge → broker | yes | `online` or `offline` |
+| `airstage2mqtt/bridge/state` | bridge → broker | yes | Bridge status and MQTT last will |
+| `airstage2mqtt/bridge/info` | bridge → broker | yes | Version and sanitized device metadata |
+
+Subscribe to everything:
+
+```sh
+mosquitto_sub -h MQTT_HOST -u USERNAME -P PASSWORD -v -t 'airstage2mqtt/#'
+```
+
+Set several properties and wait for the confirmed state publication:
+
+```sh
+mosquitto_pub -h MQTT_HOST -u USERNAME -P PASSWORD \
+  -t 'airstage2mqtt/living_room/set' \
+  -m '{"state":"ON","mode":"heat","target_temperature":21.5,"fan_mode":"auto"}'
+```
+
+Set one property without a JSON object:
+
+```sh
+mosquitto_pub -h MQTT_HOST -t 'airstage2mqtt/living_room/set/economy' -m 'ON'
+```
+
+Request a refresh:
+
+```sh
+mosquitto_pub -h MQTT_HOST -t 'airstage2mqtt/living_room/get' -n
+```
+
+### Properties
+
+Writable properties are published only when supported by the unit:
+
+| Property | Accepted values |
+| --- | --- |
+| `state` | `ON`, `OFF`, `TOGGLE` |
+| `mode` | `off`, `auto`, `cool`, `dry`, `fan_only`, `heat` |
+| `target_temperature` | Celsius number in the active mode's supported range, in 0.5 °C steps |
+| `fan_mode` | `auto`, `quiet`, `low`, `medium`, `high` |
+| `swing_mode` | `vertical_swing` or a published vertical position |
+| `economy` | `ON` or `OFF` |
+| `powerful` | `ON` or `OFF` |
+| `outdoor_low_noise` | `ON` or `OFF` |
+| `energy_save_fan` | `ON` or `OFF` |
+| `minimum_heat` | `ON` or `OFF` |
+| `indoor_led` | `ON` or `OFF` |
+| `human_detection_auto_save` | `ON` or `OFF` |
+
+Read-only state may also include `current_temperature`, `outdoor_temperature`,
+`human_detection`, `power_consumption`, `demand`, `error_code`, `filter_sign_reset`, and `model`.
+Unknown, read-only, or unsupported commands are rejected and logged without affecting other
+units. Medium-low and medium-high fan states can be reported by some units but cannot be written
+through `pyairstage`.
+
+## Home Assistant
+
+Set `homeassistant.enabled: true` and ensure Home Assistant's MQTT integration uses the configured
+discovery prefix (normally `homeassistant`). After the first successful device poll,
+AirStage2MQTT publishes one retained MQTT device-discovery document containing:
+
+- A primary climate entity.
+- Indoor and outdoor temperature sensors when supported.
+- Capability-dependent control switches and diagnostic sensors.
+- Bridge and per-unit availability.
+
+Discovery is republished when Home Assistant publishes its birth message to
+`homeassistant/status`. The `/data` volume stores only a topic-to-device index so stale retained
+discovery documents can be removed after units are deleted or discovery is disabled.
+
+Set `homeassistant.enabled: false` to use only the generic MQTT interface.
+
+## Direct Python development
+
+```sh
+python -m venv .venv
+. .venv/bin/activate
+python -m pip install -r requirements-dev.lock
+python -m pytest
+python -m ruff check src tests
+python -m mypy src
+A2M_CONFIG=./config.yaml A2M_DATA_DIR=./data \
+  A2M_MQTT_HOST=localhost python -m airstage2mqtt
+```
+
+The Windows virtual-environment activation command is `.venv\Scripts\Activate.ps1`.
+
+## Jenkins image publishing
+
+The root `Jenkinsfile` follows the build/promotion flow used by the CIDR Allow List Updater. It
+runs daily and on other job triggers, executes unit and restricted-container tests against local
+Mosquitto and AirStage fixtures, publishes an agent-native image, records its digest, promotes
+the SHA and `latest` tags, and finally creates an annotated Git tag.
+
+The Jenkins controller or job must supply:
+
+- `CONTAINER_REGISTRY_READ`
+- `CONTAINER_REGISTRY_PUSH`
+- `GIT_PUSH_URL`
+- `CI_GIT_USER_NAME`
+- `CI_GIT_USER_EMAIL`
+- `GIT_PUSH_CREDENTIALS_ID`
+
+Registry values use `host[:port]` without a scheme. Publishing is anonymous; the Docker agent
+must already trust and be allowed to push to that endpoint. Git tag credentials are bound only
+during the tag push. Successful builds produce immutable `v0.1.<BUILD_NUMBER>` image and Git
+tags, plus moving `sha-<commit>` and `latest` image tags.
+
+## Upgrades and troubleshooting
+
+```sh
+docker compose pull
+docker compose up -d --build
+docker compose logs --tail=200 bridge
+```
+
+- **Configuration error:** startup exits with status 2 and names the invalid field.
+- **Unit remains offline:** verify its reservation, MAC, IP, HTTP/HTTPS selection, VLAN routing,
+  and any Wi-Fi client isolation.
+- **MQTT remains offline:** verify broker routing, credentials, TLS CA, and topic ACLs.
+- **Home Assistant entity missing:** inspect the retained discovery topic and confirm the first
+  device poll succeeded.
+- **Container unhealthy:** check MQTT connectivity first; health represents a live MQTT session,
+  not whether every A/C is online.
+
+## Licence
+
+AirStage2MQTT is available under the MIT licence. `pyairstage` and other dependencies retain
+their respective licences.
