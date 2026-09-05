@@ -341,7 +341,7 @@ class BridgeService:
                     for unit in self.config.units:
                         snapshot = self._snapshots.get(unit.name)
                         if snapshot is not None:
-                            await self.discovery.publish(client, unit, snapshot, force=True)
+                            await self.discovery.publish(client, unit, snapshot)
                 continue
             prefix = f"{self.config.mqtt.base_topic}/"
             if not topic.startswith(prefix):

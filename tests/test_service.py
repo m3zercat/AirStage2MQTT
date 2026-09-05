@@ -122,6 +122,23 @@ async def test_ignores_and_clears_retained_commands(app_config: AppConfig) -> No
     assert client.published == [(topic, b"", app_config.mqtt.qos, True)]
 
 
+@pytest.mark.asyncio
+async def test_ha_birth_does_not_republish_unchanged_discovery(
+    app_config: AppConfig, unit_config: UnitConfig
+) -> None:
+    snapshot = DeviceSnapshot({"state": "ON"}, frozenset({"state"}), "test")
+    message = SimpleNamespace(topic="homeassistant/status", payload=b"online", retain=False)
+    client = FakeMqttClient([message])
+    service = BridgeService(app_config)
+    service._snapshots[unit_config.name] = snapshot
+    await service.discovery.publish(client, unit_config, snapshot)
+    published_before_birth = list(client.published)
+
+    await service._consume_messages(client, {})
+
+    assert client.published == published_before_birth
+
+
 def test_healthcheck_uses_recent_timestamp(tmp_path: Path) -> None:
     path = tmp_path / "health"
     path.write_text(str(time.time()), encoding="ascii")
