@@ -230,15 +230,15 @@ The Jenkins controller or job must supply:
 
 - `CONTAINER_REGISTRY_READ`
 - `CONTAINER_REGISTRY_PUSH`
-- `GIT_PUSH_URL`
 - `CI_GIT_USER_NAME`
 - `CI_GIT_USER_EMAIL`
 - `GIT_PUSH_CREDENTIALS_ID`
 
 Registry values use `host[:port]` without a scheme. Publishing is anonymous; the Docker agent
 must already trust and be allowed to push to that endpoint. Git tag credentials are bound only
-during the tag push. Successful builds produce immutable `v0.1.<BUILD_NUMBER>` image and Git
-tags, plus moving `sha-<commit>` and `latest` image tags.
+during the tag push. The tag destination is derived from the checkout's `origin`; a GitHub HTTPS
+checkout URL is rewritten to SSH for that operation. Successful builds produce immutable
+`v0.1.<BUILD_NUMBER>` image and Git tags, plus moving `sha-<commit>` and `latest` image tags.
 
 ## Upgrades and troubleshooting
 

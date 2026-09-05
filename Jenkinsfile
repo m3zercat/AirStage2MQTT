@@ -30,7 +30,6 @@ pipeline {
                     set -eu
                     : "${CONTAINER_REGISTRY_READ:?Configure CONTAINER_REGISTRY_READ in Jenkins}"
                     : "${CONTAINER_REGISTRY_PUSH:?Configure CONTAINER_REGISTRY_PUSH in Jenkins}"
-                    : "${GIT_PUSH_URL:?Configure GIT_PUSH_URL in Jenkins}"
                     : "${CI_GIT_USER_NAME:?Configure CI_GIT_USER_NAME in Jenkins}"
                     : "${CI_GIT_USER_EMAIL:?Configure CI_GIT_USER_EMAIL in Jenkins}"
                     : "${GIT_PUSH_CREDENTIALS_ID:?Configure GIT_PUSH_CREDENTIALS_ID in Jenkins}"
@@ -348,7 +347,8 @@ pipeline {
                             SSH_ASKPASS="$askpass_script" \
                             SSH_ASKPASS_REQUIRE=force \
                             GIT_SSH_COMMAND='ssh -i "$GIT_SSH_KEY" -o IdentitiesOnly=yes' \
-                                git push "$GIT_PUSH_URL" \
+                                git -c url."git@github.com:".insteadOf="https://github.com/" \
+                                push origin \
                                 "refs/tags/$VERSION:refs/tags/$VERSION"
                         '''
                     }
