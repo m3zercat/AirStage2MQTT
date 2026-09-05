@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import time
+from collections.abc import AsyncIterator
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from airstage2mqtt.airstage import DeviceSnapshot, UnitError
-from airstage2mqtt.config import UnitConfig
+from airstage2mqtt.config import AppConfig, UnitConfig
 from airstage2mqtt.service import BridgeService, UnitWorker, healthcheck
 
 
@@ -23,6 +25,19 @@ class FakeAdapter:
 
     async def apply(self, command: dict[str, object], current: DeviceSnapshot | None) -> None:
         self.commands.append(command)
+
+
+class FakeMqttClient:
+    def __init__(self, messages: list[SimpleNamespace]) -> None:
+        self.messages = self._messages(messages)
+        self.published: list[tuple[str, bytes, int, bool]] = []
+
+    async def _messages(self, messages: list[SimpleNamespace]) -> AsyncIterator[SimpleNamespace]:
+        for message in messages:
+            yield message
+
+    async def publish(self, topic: str, payload: bytes, *, qos: int, retain: bool) -> None:
+        self.published.append((topic, payload, qos, retain))
 
 
 @pytest.mark.asyncio
@@ -94,6 +109,17 @@ def test_decodes_zigbee2mqtt_style_commands(
     parts: list[str], payload: bytes, expected: dict[str, object]
 ) -> None:
     assert BridgeService._decode_command(parts, payload) == expected
+
+
+@pytest.mark.asyncio
+async def test_ignores_and_clears_retained_commands(app_config: AppConfig) -> None:
+    topic = "airstage2mqtt/living_room/set/mode"
+    client = FakeMqttClient([SimpleNamespace(topic=topic, payload=b"heat", retain=True)])
+    service = BridgeService(app_config)
+
+    await service._consume_messages(client, {})  # type: ignore[arg-type]
+
+    assert client.published == [(topic, b"", app_config.mqtt.qos, True)]
 
 
 def test_healthcheck_uses_recent_timestamp(tmp_path: Path) -> None:

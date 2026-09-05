@@ -50,6 +50,9 @@ def test_builds_device_discovery_with_capability_components(
     assert set(components) >= {"climate", "state", "current_temperature", "economy"}
     assert "outdoor_temperature" not in components
     assert components["climate"]["mode_command_topic"].endswith("/set/mode")
+    assert payload["availability"][0]["topic"] == (  # type: ignore[index]
+        "airstage2mqtt/bridges/testbridge001/state"
+    )
 
 
 def test_uses_configured_friendly_name(app_config: AppConfig, unit_config: UnitConfig) -> None:
@@ -82,10 +85,15 @@ async def test_publishes_once_and_cleans_removed_discovery(
     stored = json.loads(state_path.read_text(encoding="utf-8"))
     assert stored == {discovery_topic(app_config, unit_config): unit_config.device_id}
 
+    manager.connection_reset()
+    await manager.publish(publisher, unit_config, snapshot())
+    assert len(publisher.messages) == 2
+
     removed_config = AppConfig(
         mqtt=app_config.mqtt,
         polling=app_config.polling,
         homeassistant=app_config.homeassistant,
+        bridge_key=app_config.bridge_key,
         units=(UnitConfig("other", "E8FB1C000001", "192.168.1.41"),),
         data_dir=tmp_path,
     )

@@ -24,6 +24,7 @@ from .airstage import (
 )
 from .config import AppConfig, UnitConfig
 from .discovery import DiscoveryManager
+from .manifest import ManifestManager
 
 _LOGGER = logging.getLogger(__name__)
 SnapshotCallback = Callable[[UnitConfig, DeviceSnapshot], Awaitable[None]]
@@ -130,6 +131,7 @@ class BridgeService:
         self.config = config
         self.stop_event = asyncio.Event()
         self.discovery = DiscoveryManager(config)
+        self.manifest = ManifestManager(config)
         health_path = os.getenv("A2M_HEALTH_FILE", "/tmp/airstage2mqtt-health")
         self.health = HealthReporter(Path(health_path))
         self._snapshots: dict[str, DeviceSnapshot] = {}
@@ -167,7 +169,8 @@ class BridgeService:
 
     async def _run_connected(self) -> None:
         mqtt = self.config.mqtt
-        will = aiomqtt.Will(f"{mqtt.base_topic}/bridge/state", "offline", qos=mqtt.qos, retain=True)
+        bridge_state_topic = f"{self.config.bridge_topic}/state"
+        will = aiomqtt.Will(bridge_state_topic, "offline", qos=mqtt.qos, retain=True)
         async with aiomqtt.Client(
             hostname=mqtt.host,
             port=mqtt.port,
@@ -179,15 +182,17 @@ class BridgeService:
             tls_insecure=mqtt.tls_insecure if mqtt.tls else None,
         ) as client:
             _LOGGER.info("Connected to MQTT broker %s:%s", mqtt.host, mqtt.port)
+            previous_manifest = await self._read_retained_manifest(client)
             await client.subscribe(f"{mqtt.base_topic}/+/set", qos=mqtt.qos)
             await client.subscribe(f"{mqtt.base_topic}/+/set/+", qos=mqtt.qos)
             await client.subscribe(f"{mqtt.base_topic}/+/get", qos=mqtt.qos)
             if self.config.homeassistant.enabled:
                 await client.subscribe("homeassistant/status", qos=mqtt.qos)
-            await client.publish(
-                f"{mqtt.base_topic}/bridge/state", "online", qos=mqtt.qos, retain=True
-            )
+            await client.publish(bridge_state_topic, "online", qos=mqtt.qos, retain=True)
+            self.discovery.connection_reset()
+            await self.manifest.reconcile(client, previous_manifest)
             await self.discovery.reconcile(client)
+            await self.manifest.publish(client)
             await self._publish_bridge_info(client)
             self.health.online()
 
@@ -227,9 +232,21 @@ class BridgeService:
             if self.stop_event.is_set():
                 for unit in self.config.units:
                     await self._publish_availability(client, unit, False)
-                await client.publish(
-                    f"{mqtt.base_topic}/bridge/state", "offline", qos=mqtt.qos, retain=True
-                )
+                await client.publish(bridge_state_topic, "offline", qos=mqtt.qos, retain=True)
+
+    async def _read_retained_manifest(self, client: aiomqtt.Client) -> bytes | None:
+        """Read the previous exact-key manifest before normal subscriptions start."""
+        await client.subscribe(self.config.manifest_topic, qos=self.config.mqtt.qos)
+        try:
+            async with asyncio.timeout(1):
+                message = await anext(client.messages)
+                if str(message.topic) == self.config.manifest_topic:
+                    return message.payload
+        except TimeoutError:
+            return None
+        finally:
+            await client.unsubscribe(self.config.manifest_topic)
+        return None
 
     async def _health_loop(self) -> None:
         while True:
@@ -303,11 +320,12 @@ class BridgeService:
             )
         payload = {
             "version": __version__,
+            "bridge_key": self.config.bridge_key,
             "homeassistant": self.config.homeassistant.enabled,
             "devices": devices,
         }
         await client.publish(
-            f"{self.config.mqtt.base_topic}/bridge/info",
+            f"{self.config.bridge_topic}/info",
             json.dumps(payload, separators=(",", ":"), sort_keys=True),
             qos=self.config.mqtt.qos,
             retain=True,
@@ -329,6 +347,13 @@ class BridgeService:
             if not topic.startswith(prefix):
                 continue
             parts = topic[len(prefix) :].split("/")
+            is_command_topic = (len(parts) == 2 and parts[1] in {"set", "get"}) or (
+                len(parts) == 3 and parts[1] == "set"
+            )
+            if message.retain and is_command_topic:
+                _LOGGER.warning("Ignoring and clearing retained command on %s", topic)
+                await client.publish(topic, b"", qos=self.config.mqtt.qos, retain=True)
+                continue
             worker = workers.get(parts[0])
             if worker is None:
                 _LOGGER.warning("Ignoring command for unknown unit topic %s", topic)

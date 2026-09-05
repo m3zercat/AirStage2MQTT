@@ -1,3 +1,8 @@
+bridge:
+  # Generate once with: openssl rand -hex 16
+  # This is a stable ownership ID, not a password. Do not change it after deployment.
+  key: CHANGE_ME_TO_A_STABLE_RANDOM_KEY
+
 mqtt:
   base_topic: airstage2mqtt
 

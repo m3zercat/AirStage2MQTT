@@ -29,6 +29,7 @@ def app_config(tmp_path: Path, unit_config: UnitConfig) -> AppConfig:
         mqtt=MqttConfig(host="mqtt.local"),
         polling=PollingConfig(),
         homeassistant=HomeAssistantConfig(enabled=True),
+        bridge_key="testbridge001",
         units=(unit_config,),
         data_dir=tmp_path,
     )

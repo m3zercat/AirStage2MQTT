@@ -28,7 +28,8 @@ Automatic IP discovery is not currently supported.
    ```
 
 2. Edit `.env` with the MQTT connection and edit `config.yaml` with the real A/C addresses and
-   MAC addresses. Both files are ignored by Git.
+   MAC addresses. Generate `bridge.key` once with `openssl rand -hex 16`; keep this value stable
+   across upgrades and container replacements. Both files are ignored by Git.
 
 3. Build and start the service:
 
@@ -60,7 +61,7 @@ and credential values in YAML. The MQTT base topic and unit list are always read
 | --- | --- | --- |
 | `A2M_IMAGE` | `airstage2mqtt:local` | Image built or run by Compose |
 | `A2M_CONFIG` | `/config/config.yaml` | Configuration path inside the container |
-| `A2M_DATA_DIR` | `/data` | Discovery-index directory |
+| `A2M_DATA_DIR` | `/data` | Discovery fallback-index directory |
 | `A2M_LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL` |
 | `A2M_MQTT_HOST` | required | MQTT hostname or address |
 | `A2M_MQTT_PORT` | `1883` | MQTT TCP port |
@@ -83,6 +84,9 @@ Do not commit `.env`, `config.yaml`, or files under `secrets/`.
 ### YAML configuration
 
 ```yaml
+bridge:
+  key: 0123456789abcdef0123456789abcdef
+
 mqtt:
   base_topic: airstage2mqtt
 
@@ -114,12 +118,19 @@ units:
     turn_on_before_set_temperature: true
 ```
 
+`bridge.key` is a required, stable ownership identifier containing 8-64 letters, digits,
+underscores, or hyphens. It is not a password. Each bridge sharing a base topic must have a
+different key; changing it leaves the old manifest inaccessible to the new instance. Unless
+`mqtt.client_id` is set explicitly, the key also makes the MQTT client ID unique.
+
 `name` is the topic-safe identifier and may contain letters, digits, `_`, and `-`. It cannot
-contain spaces. `friendly_name` is optional, may contain spaces, and is used for Home Assistant
-and bridge metadata; when omitted it is derived from `name`. Unit names, MAC addresses, and IP
-addresses must be unique. `turn_on_before_set_temperature` controls whether a temperature command
-automatically powers on an off unit or is rejected. `mqtt.base_topic` controls the operational
-MQTT topic prefix; it must not contain MQTT wildcards.
+contain spaces or use the reserved names `bridge`, `bridges`, or `manifests`. `friendly_name` is
+optional, may contain spaces, and is used for Home Assistant and bridge metadata; when omitted it
+is derived from `name`. Unit names, MAC addresses, and IP addresses must be unique. Unit names
+must also be unique between bridge instances that share the same base topic.
+`turn_on_before_set_temperature` controls whether a temperature command
+automatically powers on an off unit or is rejected. `mqtt.base_topic` controls the shared
+operational MQTT topic prefix; it must not contain MQTT wildcards.
 
 The following connection settings may alternatively be placed under the `mqtt:` mapping: `host`,
 `port`, `username`, `password`, `password_file`, `tls`, `tls_ca_file`, and `tls_insecure`.
@@ -141,8 +152,9 @@ For a unit named `living_room` and the default base topic:
 | `airstage2mqtt/living_room/set/<property>` | client → bridge | no | Single-property command |
 | `airstage2mqtt/living_room/get` | client → bridge | no | Request an immediate refresh |
 | `airstage2mqtt/living_room/availability` | bridge → broker | yes | `online` or `offline` |
-| `airstage2mqtt/bridge/state` | bridge → broker | yes | Bridge status and MQTT last will |
-| `airstage2mqtt/bridge/info` | bridge → broker | yes | Version and sanitized device metadata |
+| `airstage2mqtt/bridges/<key>/state` | bridge → broker | yes | Key-scoped status and MQTT last will |
+| `airstage2mqtt/bridges/<key>/info` | bridge → broker | yes | Version and sanitized device metadata |
+| `airstage2mqtt/manifests/<key>` | bridge → broker | yes | Topics owned by this bridge instance |
 
 Subscribe to everything:
 
@@ -207,21 +219,34 @@ AirStage2MQTT publishes one retained MQTT device-discovery document containing:
 - Bridge and per-unit availability.
 
 Discovery is republished when Home Assistant publishes its birth message to
-`homeassistant/status`.
+`homeassistant/status` and after every bridge MQTT reconnection.
+
+### Ownership manifest
+
+Each instance publishes a retained manifest at `<base_topic>/manifests/<bridge.key>`. On startup,
+the bridge reads its previous manifest, compares the previously owned operational and Home
+Assistant discovery topics with the current configuration, clears obsolete retained messages,
+and publishes the replacement manifest. Manifest entries are validated before deletion so one
+instance cannot clear another instance's manifest or arbitrary broker topics.
+
+MQTT has no portable topic-list operation, so the manifest provides a deterministic inventory.
+If broker persistence is disabled, the manifest and stale retained messages disappear together.
+If broker persistence is enabled, the manifest allows cleanup after units are renamed or removed
+and after the Home Assistant discovery prefix changes. Retained messages on command and `/get`
+topics are ignored and cleared rather than executed after a restart.
 
 ### `/data` persistence
 
-The `/data` volume contains one small file, `homeassistant-discovery.json`. It records discovery
-topics and their normalized device IDs so the bridge can remove stale retained discovery messages
-after a unit is renamed or removed, the discovery prefix changes, or discovery is disabled. It
-contains no MQTT credentials, A/C state history, or command history.
+The `/data` volume contains one small fallback file, `homeassistant-discovery.json`. It records
+discovery topics and their normalized device IDs so the bridge can remove stale discovery when a
+broker manifest is missing or `mqtt.base_topic` changes. It contains no MQTT credentials, A/C
+state history, or command history.
 
-Persisting `/data` is recommended when Home Assistant discovery is enabled. The bridge still
-controls and republishes current units without it, but after a restart it cannot identify old
-discovery topics that should be cleared, potentially leaving stale Home Assistant entities. If
-discovery will always remain disabled, persistence is not functionally necessary. The supplied
-Compose file uses the named `bridge-data` volume; `docker compose down` preserves it, while
-`docker compose down -v` deletes it.
+Persisting `/data` remains recommended when Home Assistant discovery is enabled, although the
+broker manifest handles normal cleanup for a stable base topic. If discovery will always remain
+disabled, persistence is not functionally necessary. The supplied Compose file uses the named
+`bridge-data` volume; `docker compose down` preserves it, while `docker compose down -v` deletes
+it.
 
 Set `homeassistant.enabled: false` to use only the generic MQTT interface.
 

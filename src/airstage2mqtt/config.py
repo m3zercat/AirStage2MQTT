@@ -14,7 +14,9 @@ import yaml
 
 DEFAULT_CONFIG_PATH = Path("/config/config.yaml")
 _NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+_BRIDGE_KEY_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
 _MAC_RE = re.compile(r"^[0-9A-F]{12}$")
+_RESERVED_UNIT_NAMES = {"bridge", "bridges", "manifests"}
 
 
 class ConfigurationError(ValueError):
@@ -76,9 +78,18 @@ class AppConfig:
     mqtt: MqttConfig
     polling: PollingConfig
     homeassistant: HomeAssistantConfig
+    bridge_key: str
     units: tuple[UnitConfig, ...]
     data_dir: Path = Path("/data")
     log_level: str = "INFO"
+
+    @property
+    def bridge_topic(self) -> str:
+        return f"{self.mqtt.base_topic}/bridges/{self.bridge_key}"
+
+    @property
+    def manifest_topic(self) -> str:
+        return f"{self.mqtt.base_topic}/manifests/{self.bridge_key}"
 
 
 def _mapping(value: Any, name: str) -> dict[str, Any]:
@@ -172,6 +183,14 @@ def load_config(
     if not isinstance(raw, dict):
         raise ConfigurationError("configuration root must be a mapping")
 
+    bridge_raw = _mapping(raw.get("bridge"), "bridge")
+    bridge_key = str(bridge_raw.get("key", "")).strip()
+    if not _BRIDGE_KEY_RE.fullmatch(bridge_key) or bridge_key.startswith("CHANGE_ME"):
+        raise ConfigurationError(
+            "bridge.key is required and must be a stable 8-64 character value containing only "
+            "letters, digits, underscores, or hyphens"
+        )
+
     mqtt_raw = _mapping(raw.get("mqtt"), "mqtt")
     host = str(_env_value(env, "A2M_MQTT_HOST", mqtt_raw.get("host", ""))).strip()
     if not host:
@@ -214,7 +233,7 @@ def load_config(
         tls=tls,
         tls_ca_file=tls_ca_file,
         tls_insecure=tls_insecure,
-        client_id=str(mqtt_raw.get("client_id", "airstage2mqtt")),
+        client_id=str(mqtt_raw.get("client_id", f"airstage2mqtt-{bridge_key}")),
         base_topic=base_topic,
         qos=qos,
     )
@@ -260,6 +279,8 @@ def load_config(
             raise ConfigurationError(
                 f"units[{index}].name must contain only letters, digits, underscores, or hyphens"
             )
+        if name in _RESERVED_UNIT_NAMES:
+            raise ConfigurationError(f"units[{index}].name uses reserved topic name: {name}")
         mac = normalize_mac(unit_raw.get("mac", ""))
         try:
             ip = str(ipaddress.IPv4Address(str(unit_raw.get("ip", ""))))
@@ -296,6 +317,7 @@ def load_config(
         mqtt=mqtt,
         polling=polling,
         homeassistant=homeassistant,
+        bridge_key=bridge_key,
         units=tuple(units),
         data_dir=data_dir,
         log_level=log_level,

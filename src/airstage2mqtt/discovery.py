@@ -31,7 +31,7 @@ def _availability(config: AppConfig, unit: UnitConfig) -> list[dict[str, object]
     base = config.mqtt.base_topic
     return [
         {
-            "topic": f"{base}/bridge/state",
+            "topic": f"{config.bridge_topic}/state",
             "payload_available": "online",
             "payload_not_available": "offline",
         },
@@ -218,6 +218,10 @@ class DiscoveryManager:
             temporary.replace(self._path)
         except OSError:
             _LOGGER.warning("Could not persist discovery state %s", self._path, exc_info=True)
+
+    def connection_reset(self) -> None:
+        """Force discovery republishing after every MQTT reconnection."""
+        self._payloads.clear()
 
     async def reconcile(self, client: MqttPublisher) -> None:
         """Remove retained records for removed devices or disabled discovery."""

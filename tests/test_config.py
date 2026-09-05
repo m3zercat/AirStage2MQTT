@@ -7,6 +7,8 @@ import pytest
 from airstage2mqtt.config import ConfigurationError, load_config, normalize_mac
 
 BASE_CONFIG = """
+bridge:
+  key: testbridge001
 polling:
   interval_seconds: 15
 homeassistant:
@@ -28,6 +30,8 @@ def test_environment_overrides_yaml_and_password_file(tmp_path: Path) -> None:
     config_path = write_config(
         tmp_path,
         """
+bridge:
+  key: testbridge001
 mqtt:
   host: yaml-broker
   port: 1883
@@ -97,6 +101,8 @@ def test_rejects_duplicate_units(tmp_path: Path) -> None:
     path = write_config(
         tmp_path,
         """
+bridge:
+  key: testbridge001
 units:
   - name: office
     mac: E8FB1C000000
@@ -108,6 +114,19 @@ units:
     )
     with pytest.raises(ConfigurationError, match="duplicate unit name"):
         load_config(path, environ={"A2M_MQTT_HOST": "broker"})
+
+
+def test_rejects_reserved_unit_topic_names(tmp_path: Path) -> None:
+    content = BASE_CONFIG.replace("name: living_room", "name: manifests")
+    with pytest.raises(ConfigurationError, match="reserved topic name"):
+        load_config(write_config(tmp_path, content), environ={"A2M_MQTT_HOST": "broker"})
+
+
+@pytest.mark.parametrize("key", ["", "short", "contains spaces", "CHANGE_ME_RANDOM_KEY"])
+def test_requires_stable_bridge_key(tmp_path: Path, key: str) -> None:
+    content = BASE_CONFIG.replace("testbridge001", key)
+    with pytest.raises(ConfigurationError, match="bridge.key"):
+        load_config(write_config(tmp_path, content), environ={"A2M_MQTT_HOST": "broker"})
 
 
 def test_requires_static_ipv4_and_mqtt_host(tmp_path: Path) -> None:

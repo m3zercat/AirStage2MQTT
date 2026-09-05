@@ -164,6 +164,8 @@ pipeline {
                     fi
 
                     {
+                        echo 'bridge:'
+                        echo '  key: jenkinsci0001'
                         echo 'mqtt:'
                         echo '  base_topic: airstage2mqtt'
                         echo 'polling:'
@@ -188,6 +190,23 @@ pipeline {
                         echo '    ip: 192.0.2.1'
                         echo '    use_https: false'
                     } > artifacts/ci-config.yaml
+
+                    docker run --rm --network "$CI_NETWORK" \
+                        --entrypoint mosquitto_pub eclipse-mosquitto:2 \
+                        -h a2m-ci-mqtt -r -t airstage2mqtt/removed_unit \
+                        -m '{"state":"ON"}'
+                    docker run --rm --network "$CI_NETWORK" \
+                        --entrypoint mosquitto_pub eclipse-mosquitto:2 \
+                        -h a2m-ci-mqtt -r \
+                        -t homeassistant/device/airstage2mqtt_e8fb1c000099/config \
+                        -m '{"stale":true}'
+                    docker run --rm --network "$CI_NETWORK" \
+                        --entrypoint mosquitto_pub eclipse-mosquitto:2 \
+                        -h a2m-ci-mqtt -r -t airstage2mqtt/manifests/jenkinsci0001 \
+                        -m '{"schema_version":1,"bridge_key":"jenkinsci0001","operational_topics":["airstage2mqtt/removed_unit"],"discovery_topics":["homeassistant/device/airstage2mqtt_e8fb1c000099/config"]}'
+                    docker run --rm --network "$CI_NETWORK" \
+                        --entrypoint mosquitto_pub eclipse-mosquitto:2 \
+                        -h a2m-ci-mqtt -r -t airstage2mqtt/test_unit/set/mode -m heat
 
                     docker run -d \
                         --name "$CI_APP" \
@@ -227,6 +246,12 @@ pipeline {
                     discovery=$(read_retained homeassistant/device/airstage2mqtt_e8fb1c000000/config)
                     printf '%s\n' "$discovery" | grep -F '"platform":"climate"'
                     printf '%s\n' "$discovery" | grep -F '"platform":"switch"'
+                    manifest=$(read_retained airstage2mqtt/manifests/jenkinsci0001)
+                    printf '%s\n' "$manifest" | grep -F '"bridge_key":"jenkinsci0001"'
+                    printf '%s\n' "$manifest" | grep -F '"airstage2mqtt/test_unit"'
+                    test -z "$(read_retained airstage2mqtt/removed_unit)"
+                    test -z "$(read_retained homeassistant/device/airstage2mqtt_e8fb1c000099/config)"
+                    test -z "$(read_retained airstage2mqtt/test_unit/set/mode)"
 
                     docker run --rm --network "$CI_NETWORK" \
                         --entrypoint mosquitto_pub eclipse-mosquitto:2 \
@@ -253,18 +278,22 @@ pipeline {
                     docker start "$CI_MQTT" >/dev/null
                     reconnected=false
                     for attempt in $(seq 1 30); do
-                        if [ "$(read_retained airstage2mqtt/bridge/state)" = online ]; then
+                        if [ "$(read_retained airstage2mqtt/bridges/jenkinsci0001/state)" = online ]; then
                             reconnected=true
                             break
                         fi
                         sleep 1
                     done
                     test "$reconnected" = true
+                    rediscovery=$(read_retained homeassistant/device/airstage2mqtt_e8fb1c000000/config)
+                    printf '%s\n' "$rediscovery" | grep -F '"platform":"climate"'
+                    remanifest=$(read_retained airstage2mqtt/manifests/jenkinsci0001)
+                    printf '%s\n' "$remanifest" | grep -F '"bridge_key":"jenkinsci0001"'
 
                     docker kill "$CI_APP" >/dev/null
                     lwt=''
                     for attempt in $(seq 1 15); do
-                        lwt=$(read_retained airstage2mqtt/bridge/state)
+                        lwt=$(read_retained airstage2mqtt/bridges/jenkinsci0001/state)
                         [ "$lwt" = offline ] && break
                         sleep 1
                     done
