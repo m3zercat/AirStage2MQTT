@@ -1,3 +1,6 @@
+mqtt:
+  base_topic: airstage2mqtt
+
 polling:
   interval_seconds: 10
   timeout_seconds: 20
@@ -12,14 +15,15 @@ homeassistant:
 
 units:
   - name: living_room
+    friendly_name: Living Room Air Conditioner
     mac: "E8:FB:1C:00:00:00"
     ip: "192.168.1.40"
     use_https: false
     turn_on_before_set_temperature: false
 
   # - name: bedroom
+  #   friendly_name: Main Bedroom Air Conditioner
   #   mac: "E8:FB:1C:00:00:01"
   #   ip: "192.168.1.41"
   #   use_https: false
   #   turn_on_before_set_temperature: true
-

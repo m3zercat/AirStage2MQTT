@@ -45,10 +45,24 @@ def test_builds_device_discovery_with_capability_components(
     payload = build_discovery_payload(app_config, unit_config, snapshot())
 
     assert payload["device"]["identifiers"] == ["airstage2mqtt_e8fb1c000000"]  # type: ignore[index]
+    assert payload["device"]["name"] == "Living Room"  # type: ignore[index]
     components = payload["components"]  # type: ignore[assignment]
     assert set(components) >= {"climate", "state", "current_temperature", "economy"}
     assert "outdoor_temperature" not in components
     assert components["climate"]["mode_command_topic"].endswith("/set/mode")
+
+
+def test_uses_configured_friendly_name(app_config: AppConfig, unit_config: UnitConfig) -> None:
+    named_unit = UnitConfig(
+        name=unit_config.name,
+        mac=unit_config.mac,
+        ip=unit_config.ip,
+        friendly_name="Downstairs Air Conditioner",
+    )
+
+    payload = build_discovery_payload(app_config, named_unit, snapshot())
+
+    assert payload["device"]["name"] == "Downstairs Air Conditioner"  # type: ignore[index]
 
 
 @pytest.mark.asyncio

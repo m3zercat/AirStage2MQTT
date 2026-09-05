@@ -164,6 +164,8 @@ pipeline {
                     fi
 
                     {
+                        echo 'mqtt:'
+                        echo '  base_topic: airstage2mqtt'
                         echo 'polling:'
                         echo '  interval_seconds: 2'
                         echo '  timeout_seconds: 1'
@@ -176,6 +178,7 @@ pipeline {
                         echo '  discovery_prefix: homeassistant'
                         echo 'units:'
                         echo '  - name: test_unit'
+                        echo '    friendly_name: Test Air Conditioner'
                         echo '    mac: E8FB1C000000'
                         echo "    ip: $unit_ip"
                         echo '    use_https: false'
@@ -196,7 +199,6 @@ pipeline {
                         -e A2M_CONFIG=/config/config.yaml \
                         -e A2M_MQTT_HOST=a2m-ci-mqtt \
                         -e A2M_MQTT_PORT=1883 \
-                        -e A2M_BASE_TOPIC=airstage2mqtt \
                         -e A2M_LOG_LEVEL=DEBUG \
                         -v "$PWD/artifacts/ci-config.yaml:/config/config.yaml:ro" \
                         -v "$CI_DATA_VOLUME:/data" \

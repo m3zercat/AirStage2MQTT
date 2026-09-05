@@ -32,8 +32,10 @@ mqtt:
   host: yaml-broker
   port: 1883
   password: yaml-password
+  base_topic: house/airstage
 units:
   - name: living_room
+    friendly_name: Living Room Air Conditioner
     mac: E8FB1C000000
     ip: 192.168.1.40
 """,
@@ -49,7 +51,7 @@ units:
             "A2M_MQTT_PASSWORD": "env-secret",
             "A2M_MQTT_PASSWORD_FILE": str(password_path),
             "A2M_MQTT_TLS": "true",
-            "A2M_BASE_TOPIC": "house/airstage",
+            "A2M_BASE_TOPIC": "ignored/environment/topic",
             "A2M_DATA_DIR": str(tmp_path / "data"),
         },
     )
@@ -60,6 +62,17 @@ units:
     assert config.mqtt.tls is True
     assert config.mqtt.base_topic == "house/airstage"
     assert config.units[0].device_id == "E8FB1C000000"
+    assert config.units[0].display_name == "Living Room Air Conditioner"
+
+
+def test_derives_friendly_name_from_topic_name(tmp_path: Path) -> None:
+    config = load_config(
+        write_config(tmp_path),
+        environ={"A2M_MQTT_HOST": "broker"},
+    )
+
+    assert config.units[0].friendly_name is None
+    assert config.units[0].display_name == "Living Room"
 
 
 @pytest.mark.parametrize(
@@ -108,6 +121,8 @@ def test_requires_static_ipv4_and_mqtt_host(tmp_path: Path) -> None:
 def test_rejects_wildcard_base_topic(tmp_path: Path) -> None:
     with pytest.raises(ConfigurationError, match="no wildcards"):
         load_config(
-            write_config(tmp_path),
-            environ={"A2M_MQTT_HOST": "broker", "A2M_BASE_TOPIC": "bad/+"},
+            write_config(
+                tmp_path, BASE_CONFIG.replace("polling:", "mqtt:\n  base_topic: bad/+\npolling:")
+            ),
+            environ={"A2M_MQTT_HOST": "broker"},
         )

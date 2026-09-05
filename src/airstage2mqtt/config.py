@@ -58,11 +58,17 @@ class UnitConfig:
     ip: str
     use_https: bool = False
     turn_on_before_set_temperature: bool = False
+    friendly_name: str | None = None
 
     @property
     def device_id(self) -> str:
         """Return the Fujitsu device ID (the MAC without separators)."""
         return self.mac
+
+    @property
+    def display_name(self) -> str:
+        """Return the configured display name or derive one from the topic-safe name."""
+        return self.friendly_name or self.name.replace("_", " ").replace("-", " ").title()
 
 
 @dataclass(frozen=True, slots=True)
@@ -196,9 +202,7 @@ def load_config(
     tls_ca_file = _optional_string(
         _env_value(env, "A2M_MQTT_TLS_CA_FILE", mqtt_raw.get("tls_ca_file"))
     )
-    base_topic = str(
-        _env_value(env, "A2M_BASE_TOPIC", mqtt_raw.get("base_topic", "airstage2mqtt"))
-    ).strip(" /")
+    base_topic = str(mqtt_raw.get("base_topic", "airstage2mqtt")).strip(" /")
     if not base_topic or "+" in base_topic or "#" in base_topic:
         raise ConfigurationError("MQTT base topic must be non-empty and contain no wildcards")
     qos = _integer(mqtt_raw.get("qos", 1), "MQTT QoS", 0, 2)
@@ -280,6 +284,7 @@ def load_config(
                     unit_raw.get("turn_on_before_set_temperature", False),
                     f"{name}.turn_on_before_set_temperature",
                 ),
+                friendly_name=_optional_string(unit_raw.get("friendly_name")),
             )
         )
 

@@ -53,8 +53,8 @@ docker compose down
 
 ### Environment variables
 
-Docker Compose loads `.env`. Environment variables override the corresponding `mqtt` values in
-YAML; the unit list is always read from YAML.
+Docker Compose loads `.env`. Environment variables override the corresponding MQTT connection
+and credential values in YAML. The MQTT base topic and unit list are always read from YAML.
 
 | Variable | Default | Description |
 | --- | --- | --- |
@@ -70,7 +70,6 @@ YAML; the unit list is always read from YAML.
 | `A2M_MQTT_TLS` | `false` | Enable MQTT TLS |
 | `A2M_MQTT_TLS_CA_FILE` | system CAs | Optional CA bundle for MQTT TLS |
 | `A2M_MQTT_TLS_INSECURE` | `false` | Disable MQTT certificate verification; discouraged |
-| `A2M_BASE_TOPIC` | `airstage2mqtt` | MQTT topic prefix; wildcards are rejected |
 
 For file-based credentials, create `secrets/mqtt_password`, uncomment the password-file volume
 in `compose.yml`, remove `A2M_MQTT_PASSWORD`, and set:
@@ -84,6 +83,9 @@ Do not commit `.env`, `config.yaml`, or files under `secrets/`.
 ### YAML configuration
 
 ```yaml
+mqtt:
+  base_topic: airstage2mqtt
+
 polling:
   interval_seconds: 10
   timeout_seconds: 20
@@ -98,25 +100,31 @@ homeassistant:
 
 units:
   - name: living_room
+    friendly_name: Living Room Air Conditioner
     mac: "E8:FB:1C:00:00:00"
     ip: "192.168.1.40"
     use_https: false
     turn_on_before_set_temperature: false
 
   - name: bedroom
+    friendly_name: Main Bedroom Air Conditioner
     mac: "E8:FB:1C:00:00:01"
     ip: "192.168.1.41"
     use_https: false
     turn_on_before_set_temperature: true
 ```
 
-Unit names may contain letters, digits, `_`, and `-`; they become part of the MQTT topic. Names,
-MAC addresses, and IP addresses must be unique. `turn_on_before_set_temperature` controls whether
-a temperature command automatically powers on an off unit or is rejected.
+`name` is the topic-safe identifier and may contain letters, digits, `_`, and `-`. It cannot
+contain spaces. `friendly_name` is optional, may contain spaces, and is used for Home Assistant
+and bridge metadata; when omitted it is derived from `name`. Unit names, MAC addresses, and IP
+addresses must be unique. `turn_on_before_set_temperature` controls whether a temperature command
+automatically powers on an off unit or is rejected. `mqtt.base_topic` controls the operational
+MQTT topic prefix; it must not contain MQTT wildcards.
 
-The following MQTT settings may alternatively be placed under a `mqtt:` YAML mapping: `host`,
-`port`, `username`, `password`, `password_file`, `tls`, `tls_ca_file`, `tls_insecure`,
-`client_id`, `base_topic`, and `qos`.
+The following connection settings may alternatively be placed under the `mqtt:` mapping: `host`,
+`port`, `username`, `password`, `password_file`, `tls`, `tls_ca_file`, and `tls_insecure`.
+Environment variables take precedence for those settings. `base_topic`, `client_id`, and `qos`
+are YAML-only settings.
 
 `use_https` controls the local A/C connection, not MQTT. `pyairstage` disables certificate
 validation for local HTTPS because the unit certificate does not match its IP address. Keep the
@@ -199,8 +207,21 @@ AirStage2MQTT publishes one retained MQTT device-discovery document containing:
 - Bridge and per-unit availability.
 
 Discovery is republished when Home Assistant publishes its birth message to
-`homeassistant/status`. The `/data` volume stores only a topic-to-device index so stale retained
-discovery documents can be removed after units are deleted or discovery is disabled.
+`homeassistant/status`.
+
+### `/data` persistence
+
+The `/data` volume contains one small file, `homeassistant-discovery.json`. It records discovery
+topics and their normalized device IDs so the bridge can remove stale retained discovery messages
+after a unit is renamed or removed, the discovery prefix changes, or discovery is disabled. It
+contains no MQTT credentials, A/C state history, or command history.
+
+Persisting `/data` is recommended when Home Assistant discovery is enabled. The bridge still
+controls and republishes current units without it, but after a restart it cannot identify old
+discovery topics that should be cleared, potentially leaving stale Home Assistant entities. If
+discovery will always remain disabled, persistence is not functionally necessary. The supplied
+Compose file uses the named `bridge-data` volume; `docker compose down` preserves it, while
+`docker compose down -v` deletes it.
 
 Set `homeassistant.enabled: false` to use only the generic MQTT interface.
 

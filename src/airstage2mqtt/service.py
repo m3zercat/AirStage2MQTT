@@ -296,7 +296,7 @@ class BridgeService:
             snapshot = self._snapshots.get(unit.name)
             devices.append(
                 {
-                    "friendly_name": unit.name,
+                    "friendly_name": unit.display_name,
                     "device_id": unit.device_id,
                     "model": snapshot.model if snapshot else None,
                 }

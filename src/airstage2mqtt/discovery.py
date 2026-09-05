@@ -175,7 +175,7 @@ def build_discovery_payload(
             "connections": [["mac", formatted_mac]],
             "manufacturer": "Fujitsu",
             "model": snapshot.model,
-            "name": unit.name.replace("_", " ").replace("-", " ").title(),
+            "name": unit.display_name,
         },
         "origin": {
             "name": "AirStage2MQTT",
