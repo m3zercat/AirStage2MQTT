@@ -62,6 +62,15 @@ def build_discovery_payload(
     )
     components: dict[str, dict[str, object]] = {}
 
+    components["bridge_version"] = {
+        "platform": "sensor",
+        "unique_id": f"{identifier}_bridge_version",
+        "name": "Bridge version",
+        "state_topic": f"{config.bridge_topic}/info",
+        "value_template": "{{ value_json.version }}",
+        "entity_category": "diagnostic",
+    }
+
     climate: dict[str, object] = {
         "platform": "climate",
         "unique_id": f"{identifier}_climate",

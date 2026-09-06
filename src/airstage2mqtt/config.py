@@ -17,9 +17,7 @@ _NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _BRIDGE_KEY_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
 _MAC_RE = re.compile(r"^[0-9A-F]{12}$")
 _RESERVED_UNIT_NAMES = {"bridge", "bridges", "manifests"}
-DIAGNOSTIC_FIELDS = frozenset(
-    {"demand", "error_code", "human_detection", "power_consumption"}
-)
+DIAGNOSTIC_FIELDS = frozenset({"demand", "error_code", "human_detection", "power_consumption"})
 
 
 class ConfigurationError(ValueError):

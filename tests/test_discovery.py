@@ -51,6 +51,14 @@ def test_builds_device_discovery_with_capability_components(
     assert "outdoor_temperature" not in components
     assert "human_detection" not in components
     assert components["climate"]["mode_command_topic"].endswith("/set/mode")
+    assert components["bridge_version"] == {
+        "platform": "sensor",
+        "unique_id": "airstage2mqtt_e8fb1c000000_bridge_version",
+        "name": "Bridge version",
+        "state_topic": "airstage2mqtt/bridges/testbridge001/info",
+        "value_template": "{{ value_json.version }}",
+        "entity_category": "diagnostic",
+    }
     assert payload["availability"][0]["topic"] == (  # type: ignore[index]
         "airstage2mqtt/bridges/testbridge001/state"
     )

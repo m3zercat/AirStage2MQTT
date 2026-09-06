@@ -50,9 +50,7 @@ def test_normalizes_pyairstage_snapshot() -> None:
         "living_room",
         DEVICE_ID,
         "192.168.1.40",
-        diagnostics=frozenset(
-            {"power_consumption", "error_code", "demand", "human_detection"}
-        ),
+        diagnostics=frozenset({"power_consumption", "error_code", "demand", "human_detection"}),
     )
 
     snapshot = adapter._snapshot(ac, device)
@@ -99,9 +97,7 @@ def test_omits_diagnostics_unless_enabled_and_ignores_blank_values() -> None:
         "living_room",
         DEVICE_ID,
         "192.168.1.40",
-        diagnostics=frozenset(
-            {"error_code", "demand", "human_detection", "power_consumption"}
-        ),
+        diagnostics=frozenset({"error_code", "demand", "human_detection", "power_consumption"}),
     )
     enabled_snapshot = enabled._snapshot(ac, device)
 

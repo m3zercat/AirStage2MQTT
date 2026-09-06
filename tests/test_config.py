@@ -100,9 +100,7 @@ def test_loads_enabled_diagnostics_per_unit(tmp_path: Path) -> None:
 
     config = load_config(write_config(tmp_path, content), environ={"A2M_MQTT_HOST": "broker"})
 
-    assert config.units[0].diagnostics == frozenset(
-        {"error_code", "demand", "human_detection"}
-    )
+    assert config.units[0].diagnostics == frozenset({"error_code", "demand", "human_detection"})
 
 
 @pytest.mark.parametrize(

@@ -315,9 +315,10 @@ flowchart LR
 ```
 
 One retained Home Assistant device-discovery topic represents each physical A/C and contains its
-climate entity, supported sensors and switches, and configured diagnostics. Identical discovery is
-suppressed during a connection. It is offered again after an A2M MQTT reconnect so broker data can
-be repaired; an unchanged Home Assistant birth message does not cause repeated discovery churn.
+climate entity, supported sensors and switches, configured diagnostics, and a bridge-version
+diagnostic sourced from the retained bridge information. Identical discovery is suppressed during
+a connection. It is offered again after an A2M MQTT reconnect so broker data can be repaired; an
+unchanged Home Assistant birth message does not cause repeated discovery churn.
 
 The configurable diagnostics—`error_code`, `demand`, and `power_consumption`—are disabled by
 default. Enabling one adds a diagnostic entity even if the current reading is absent; the entity

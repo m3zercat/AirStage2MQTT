@@ -258,6 +258,7 @@ AirStage2MQTT publishes one retained MQTT device-discovery document containing:
 - A primary climate entity.
 - Indoor and outdoor temperature sensors when supported.
 - Capability-dependent control switches and explicitly enabled diagnostic sensors.
+- A Bridge version diagnostic sensor sourced from the retained bridge information.
 - Bridge and per-unit availability.
 
 Discovery is retained and published once after every bridge MQTT connection. Home Assistant birth
