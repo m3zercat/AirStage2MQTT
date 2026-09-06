@@ -78,12 +78,43 @@ pipeline {
             }
         }
 
-        stage('Quality and unit tests') {
+        stage('Lint') {
             steps {
                 sh '''
                     set -eu
-                    docker build --pull --no-cache \
+                    docker build --pull \
+                        --target lint .
+                '''
+            }
+        }
+
+        stage('Formatting') {
+            steps {
+                sh '''
+                    set -eu
+                    docker build --pull \
+                        --target format-check .
+                '''
+            }
+        }
+
+        stage('Type checking') {
+            steps {
+                sh '''
+                    set -eu
+                    docker build --pull \
+                        --target type-check .
+                '''
+            }
+        }
+
+        stage('Unit tests') {
+            steps {
+                sh '''
+                    set -eu
+                    docker build --pull \
                         --target test \
+                        --build-arg "TEST_RUN_ID=$BUILD_TAG" \
                         --tag "$TEST_IMAGE" .
                 '''
             }
@@ -93,7 +124,7 @@ pipeline {
             steps {
                 sh '''
                     set -eu
-                    docker build --pull --no-cache \
+                    docker build --pull \
                         --target runtime \
                         --build-arg "A2M_VERSION=$VERSION" \
                         --label "org.opencontainers.image.created=$CREATED" \
