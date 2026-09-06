@@ -48,8 +48,8 @@ to its MQTT broker and configured A/C addresses.
 | --- | --- |
 | `config.py` | Loads and validates MQTT, polling, discovery, bridge ownership, and per-unit settings. Environment variables override MQTT connection values; unit definitions remain in YAML. |
 | `service.py` / `BridgeService` | Owns the MQTT connection, last will, subscriptions, readiness state, publish-on-change caches, and worker lifecycle. |
-| `service.py` / `UnitWorker` | Serializes polling and commands for one unit, tracks consecutive failures, and prevents one A/C from blocking another. |
-| `airstage.py` | Uses `pyairstage.ApiLocal`, converts device responses into normalized state, tracks stable capabilities, and validates/applies commands. |
+| `service.py` / `UnitWorker` | Serializes polling and commands for one unit, owns its reschedulable poll deadline and optimistic snapshot, tracks consecutive failures, and prevents one A/C from blocking another. |
+| `airstage.py` | Uses `pyairstage.ApiLocal`, converts device responses into normalized state, tracks stable capabilities, validates and models accepted commands, and applies their device writes. |
 | `discovery.py` | Builds one Home Assistant device-discovery document per A/C, suppresses identical updates, and explicitly removes disabled components. |
 | `manifest.py` | Publishes the bridge-owned topic inventory and safely clears obsolete retained topics. |
 
@@ -149,7 +149,7 @@ units from becoming operational.
 
 ```mermaid
 flowchart TD
-    wait["Poll interval expires<br/>or /get requests refresh"] --> lock["Acquire unit lock"]
+    wait["Poll deadline expires<br/>regular, reconciliation, or /get"] --> lock["Acquire unit lock"]
     lock --> request["Read unit through ApiLocal"]
     request --> result{"Valid response?"}
     result -- No --> failures["Increment this unit's failure count"]
@@ -171,16 +171,18 @@ flowchart TD
     update --> release
 ```
 
-Polling always continues at `polling.interval_seconds`; publish suppression does not reduce how
-often A2M checks the hardware. The first successful poll after each MQTT connection republishes
-state so a broker that lost retained data is repaired. Later polls publish only semantic changes.
+Without commands, polling continues at `polling.interval_seconds`; publish suppression does not
+reduce how often A2M checks the hardware. A command replaces the pending regular deadline with a
+short reconciliation deadline. After that poll finishes, the worker returns to the regular
+interval. The first successful poll after each MQTT connection republishes state so a broker that
+lost retained data is repaired. Later polls publish only semantic changes.
 
 Capabilities only grow during a process lifetime. Across restarts, the persisted discovery record
 preserves prior non-diagnostic components if a response is temporarily incomplete. Diagnostic
 components are determined by configuration, never by whether one individual poll happened to
 contain a value.
 
-## Command and confirmation flow
+## Optimistic command and reconciliation flow
 
 ```mermaid
 sequenceDiagram
@@ -188,29 +190,69 @@ sequenceDiagram
     participant MQTT as MQTT broker
     participant Bridge as BridgeService
     participant Worker as UnitWorker
+    participant Adapter as PyairstageLocalUnit
     participant AC as AirStage local API
 
     Client->>MQTT: Publish /set or /set/property
     MQTT->>Bridge: Deliver non-retained command
     Bridge->>Bridge: Decode JSON and select unit
     Bridge->>Worker: Queue command task
+    Worker->>Worker: Cancel pending poll deadline
     Worker->>Worker: Acquire per-unit lock
-    Worker->>Worker: Validate writable properties and capabilities
-    Worker->>AC: Apply operations in safe order
-    AC-->>Worker: Command response
-    Worker->>AC: Refresh complete current state
-    AC-->>Worker: Confirmed device snapshot
-    Worker->>MQTT: Publish retained state only if changed
+    opt No prior snapshot exists
+        Worker->>Adapter: Obtain baseline snapshot
+        Adapter->>AC: Read current state
+        AC-->>Adapter: Device state
+        Adapter-->>Worker: Normalized baseline
+    end
+    Worker->>Adapter: Accept command against current snapshot
+    Adapter-->>Worker: Canonical command + optimistic snapshot
+    Worker->>Worker: Install optimistic snapshot
+    Worker->>Bridge: Notify state listener before device write
+    Bridge->>MQTT: Publish retained optimistic state if changed
+    Worker->>Adapter: Apply accepted command
+    Adapter->>AC: Write operations in safe order
+    AC-->>Adapter: Write response
+    Adapter-->>Worker: Write completed or failed
+    Worker->>Worker: Schedule reconciliation in finally
     Worker->>Worker: Release lock
+    Note over Worker: Wait command_refresh_delay_seconds
+    Worker->>Adapter: Reconciliation poll
+    Adapter->>AC: Read current state
+    AC-->>Adapter: Actual device state
+    Adapter-->>Worker: Normalized actual snapshot
+    Worker->>Bridge: Notify state listener
+    alt Actual snapshot equals optimistic snapshot
+        Bridge->>Bridge: Suppress duplicate MQTT state
+    else Actual snapshot differs
+        Bridge->>MQTT: Publish corrected retained state
+    end
+    Worker->>Worker: Resume regular poll interval
 ```
 
 The same lock covers normal polling and command execution, so they cannot interleave requests to
-one unit. Multi-property commands are ordered safely—for example, power-on can precede mode and
-temperature changes, while a requested power-off is applied last. A command response alone is not
-treated as state confirmation; A2M reads the unit again and publishes that confirmed snapshot.
+one unit. A pending poll is cancelled as soon as a command task starts; an already-running poll is
+allowed to finish before the command acquires the lock. Multi-property commands are first
+validated and normalized as one operation. The modeled snapshot preserves uncommanded readings
+and capabilities while resolving values such as `TOGGLE`, enum aliases, Boolean controls,
+temperature rounding, and power/mode side effects.
 
-Invalid, unsupported, and read-only properties are rejected for only the addressed unit. A `/get`
-message does not write anything; it wakes that unit's worker for an immediate refresh.
+Listeners see that modeled snapshot before any device write. The write is then ordered safely—for
+example, power-on can precede mode and temperature changes, while a requested power-off is applied
+last. Whether the write succeeds or fails, the worker schedules an authoritative read after
+`polling.command_refresh_delay_seconds` (two seconds by default). An identical full snapshot is
+suppressed by the normal publish-on-change cache; any difference, including an unrelated sensor
+change, is published.
+
+Each new accepted command replaces the pending reconciliation deadline, so a burst of commands
+settles with one poll after the final write. An explicit `/get` has priority over that delay and
+polls as soon as the unit lock becomes available. After reconciliation completes, the next poll is
+scheduled using `polling.interval_seconds`.
+
+Invalid, unsupported, and read-only properties are rejected before listeners are notified or the
+device is written. If no prior snapshot exists—for example, for a unit that was unreachable at
+startup—the worker must first obtain a baseline so it can preserve a complete state document and
+validate capabilities. A failed baseline read rejects the command without inventing state.
 
 ## Availability, disconnects, and restarts
 
@@ -287,22 +329,26 @@ followed by the final document without that component.
 
 ```mermaid
 flowchart TB
-    ac[("A/C unit<br/>source of truth")]
-    runtime["A2M memory<br/>latest snapshots and dedup caches"]
+    command["Accepted MQTT command"]
+    ac[("A/C unit<br/>authoritative actual state")]
+    runtime["A2M memory<br/>modeled current snapshots<br/>and dedup caches"]
     broker[("Mosquitto retained store<br/>current state, availability, discovery, manifest")]
     data[("A2M /data<br/>discovery ownership and schema index")]
     recorder[("Home Assistant recorder<br/>optional history")]
 
-    ac -->|poll| runtime
+    command -->|optimistic model| runtime
+    runtime -->|device write| ac
+    ac -->|authoritative reconciliation poll| runtime
     runtime -->|changed current values| broker
     runtime -->|discovery index only| data
     broker --> recorder
 ```
 
-A2M deliberately does not persist readings or command history in `/data`. The A/C remains the live
-source of truth; Mosquitto retains the latest published values, and Home Assistant's recorder owns
-historical data. Mosquitto persistence is therefore needed if retained MQTT messages must survive a
-broker restart.
+A2M deliberately does not persist readings or command history in `/data`. In memory and MQTT, an
+accepted command is treated as the current modeled state until a later device poll confirms or
+corrects it. The A/C remains the authoritative source for reconciliation; Mosquitto retains the
+latest published model, and Home Assistant's recorder owns historical data. Mosquitto persistence
+is therefore needed if retained MQTT messages must survive a broker restart.
 
 Persisting `/data` is still recommended. It is not needed for live control, but it allows A2M to
 remember discovery ownership and schema across container replacement, including clean component
