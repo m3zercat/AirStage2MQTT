@@ -141,7 +141,7 @@ def build_discovery_payload(
         "demand": "Demand",
         "error_code": "Error code",
     }
-    for field in sorted(unit.diagnostics):
+    for field in sorted(unit.diagnostics & diagnostic_names.keys()):
         components[field] = {
             "platform": "sensor",
             "unique_id": f"{identifier}_{field}",
@@ -177,7 +177,7 @@ def build_discovery_payload(
             "state_off": "OFF",
         }
 
-    if "human_detection" in snapshot.capabilities:
+    if "human_detection" in unit.diagnostics:
         components["human_detection"] = {
             "platform": "binary_sensor",
             "unique_id": f"{identifier}_human_detection",
@@ -323,7 +323,8 @@ class DiscoveryManager:
         removal = json.loads(final_payload)
         removal_components = removal["components"]
         for component_id in sorted(removed_diagnostics):
-            removal_components[component_id] = {"platform": "sensor"}
+            platform = "binary_sensor" if component_id == "human_detection" else "sensor"
+            removal_components[component_id] = {"platform": platform}
         removal_payload = json.dumps(removal, separators=(",", ":"), sort_keys=True)
         return removal_payload, final_payload
 

@@ -32,6 +32,7 @@ units:
       # enabled:
       #   - error_code
       #   - demand
+      #   - human_detection
       #   - power_consumption
 
   # - name: bedroom

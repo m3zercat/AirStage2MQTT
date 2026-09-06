@@ -50,7 +50,9 @@ def test_normalizes_pyairstage_snapshot() -> None:
         "living_room",
         DEVICE_ID,
         "192.168.1.40",
-        diagnostics=frozenset({"power_consumption", "error_code", "demand"}),
+        diagnostics=frozenset(
+            {"power_consumption", "error_code", "demand", "human_detection"}
+        ),
     )
 
     snapshot = adapter._snapshot(ac, device)
@@ -64,6 +66,7 @@ def test_normalizes_pyairstage_snapshot() -> None:
     assert snapshot.state["outdoor_temperature"] == 12.5
     assert snapshot.state["swing_mode"] == "high"
     assert snapshot.state["economy"] == "ON"
+    assert snapshot.state["human_detection"] == "OFF"
     assert snapshot.state["power_consumption"] == 123
     assert "outdoor_low_noise" not in snapshot.state
 
@@ -76,6 +79,7 @@ def test_omits_diagnostics_unless_enabled_and_ignores_blank_values() -> None:
             parameter("iu_onoff", 1),
             parameter("iu_op_mode", 1),
             parameter("iu_fan_spd", 8),
+            parameter("iu_hmn_det", 1),
             parameter("iu_err_code", 0),
             parameter("iu_demand", 65535),
             parameter("iu_pow_cons", ""),
@@ -86,18 +90,23 @@ def test_omits_diagnostics_unless_enabled_and_ignores_blank_values() -> None:
     disabled = object.__new__(PyairstageLocalUnit)
     disabled.config = UnitConfig("living_room", DEVICE_ID, "192.168.1.40")
     disabled_snapshot = disabled._snapshot(ac, device)
-    assert not {"error_code", "demand", "power_consumption"} & set(disabled_snapshot.state)
+    assert not {"error_code", "demand", "human_detection", "power_consumption"} & set(
+        disabled_snapshot.state
+    )
 
     enabled = object.__new__(PyairstageLocalUnit)
     enabled.config = UnitConfig(
         "living_room",
         DEVICE_ID,
         "192.168.1.40",
-        diagnostics=frozenset({"error_code", "demand", "power_consumption"}),
+        diagnostics=frozenset(
+            {"error_code", "demand", "human_detection", "power_consumption"}
+        ),
     )
     enabled_snapshot = enabled._snapshot(ac, device)
 
     assert enabled_snapshot.state["error_code"] == 0
+    assert enabled_snapshot.state["human_detection"] == "ON"
     assert "demand" not in enabled_snapshot.state
     assert "power_consumption" not in enabled_snapshot.state
     assert {"error_code", "demand", "power_consumption"} <= enabled_snapshot.capabilities

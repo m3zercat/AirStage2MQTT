@@ -187,6 +187,8 @@ class PyairstageLocalUnit:
             ("human_detection_auto_save", "get_hmn_detection_auto_save"),
         )
         for field, getter_name in boolean_getters:
+            if field in self._CONFIGURABLE_DIAGNOSTICS and field not in self.config.diagnostics:
+                continue
             try:
                 value = getattr(ac, getter_name)()
             except (KeyError, TypeError, ValueError, AirstageACError):

@@ -146,12 +146,12 @@ operational MQTT topic prefix; it must not contain MQTT wildcards.
 write before polling the unit to reconcile its actual state. Each new command restarts this short
 delay; after reconciliation, polling returns to `polling.interval_seconds`.
 
-`diagnostics.enabled` is an optional per-unit list containing `error_code`, `demand`, and/or
-`power_consumption`. If `diagnostics`, `enabled`, or the list itself is omitted or empty, all
-three are disabled. Disabled diagnostics are omitted from both MQTT state and Home Assistant
-discovery. Unknown names are configuration errors. Enabled diagnostics are discovered as active
-diagnostic entities; a blank or Fujitsu `65535` unsupported value is omitted from state and
-logged once instead of being published as a reading.
+`diagnostics.enabled` is an optional per-unit list containing `error_code`, `demand`,
+`human_detection`, and/or `power_consumption`. If `diagnostics`, `enabled`, or the list itself is
+omitted or empty, all four are disabled. Disabled diagnostics are omitted from both MQTT state
+and Home Assistant discovery. Unknown names are configuration errors. Enabled diagnostics are
+discovered as active diagnostic entities; a blank or Fujitsu `65535` unsupported value is omitted
+from state and logged once instead of being published as a reading.
 
 The following connection settings may alternatively be placed under the `mqtt:` mapping: `host`,
 `port`, `username`, `password`, `password_file`, `tls`, `tls_ca_file`, and `tls_insecure`.
@@ -234,17 +234,18 @@ Writable properties are published only when supported by the unit:
 | `human_detection_auto_save` | `ON` or `OFF` |
 
 Read-only state may also include `current_temperature`, `outdoor_temperature`,
-`human_detection`, `filter_sign_reset`, and `model`. When enabled for that unit, it may also
-include `power_consumption`, `demand`, and `error_code`.
+`filter_sign_reset`, and `model`. When enabled for that unit, it may also include
+`human_detection`, `power_consumption`, `demand`, and `error_code`.
 Unknown, read-only, or unsupported commands are rejected and logged without affecting other
 units. Medium-low and medium-high fan states can be reported by some units but cannot be written
 through `pyairstage`.
 
-The three configurable diagnostics expose raw, model-dependent local API fields:
+The four configurable diagnostics expose model-dependent local API fields:
 
 - `error_code` is the unit's raw fault code; `0` normally means no reported fault.
 - `demand` is a raw demand/capacity-control value and should not be interpreted as a reliable
   compressor-running indicator.
+- `human_detection` reports whether the unit's occupancy sensor currently detects a person.
 - `power_consumption` is not available on every model, and AirStage2MQTT deliberately assigns no
   power/energy unit or Home Assistant device class until its meaning can be validated by model.
 

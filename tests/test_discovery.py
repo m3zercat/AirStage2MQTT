@@ -49,6 +49,7 @@ def test_builds_device_discovery_with_capability_components(
     components = payload["components"]  # type: ignore[assignment]
     assert set(components) >= {"climate", "state", "current_temperature", "economy"}
     assert "outdoor_temperature" not in components
+    assert "human_detection" not in components
     assert components["climate"]["mode_command_topic"].endswith("/set/mode")
     assert payload["availability"][0]["topic"] == (  # type: ignore[index]
         "airstage2mqtt/bridges/testbridge001/state"
@@ -85,15 +86,16 @@ def test_diagnostic_discovery_is_controlled_only_by_unit_config(
         name=unit_config.name,
         mac=unit_config.mac,
         ip=unit_config.ip,
-        diagnostics=frozenset({"error_code", "demand"}),
+        diagnostics=frozenset({"error_code", "demand", "human_detection"}),
     )
     missing_values = DeviceSnapshot({"state": "ON"}, frozenset({"state"}), "ASYG")
     enabled = build_discovery_payload(app_config, enabled_unit, missing_values)
     enabled_components = enabled["components"]  # type: ignore[assignment]
 
-    assert {"error_code", "demand"} <= set(enabled_components)
+    assert {"error_code", "demand", "human_detection"} <= set(enabled_components)
     assert "power_consumption" not in enabled_components
     assert "enabled_by_default" not in enabled_components["error_code"]
+    assert enabled_components["human_detection"]["platform"] == "binary_sensor"
 
 
 def test_bridge_initializing_is_treated_as_unavailable(
@@ -153,7 +155,7 @@ async def test_explicitly_removes_disabled_diagnostic_across_restart(
         name=unit_config.name,
         mac=unit_config.mac,
         ip=unit_config.ip,
-        diagnostics=frozenset({"error_code"}),
+        diagnostics=frozenset({"error_code", "human_detection"}),
     )
     enabled_config = AppConfig(
         mqtt=app_config.mqtt,
@@ -172,7 +174,9 @@ async def test_explicitly_removes_disabled_diagnostic_across_restart(
     removal = json.loads(publisher.messages[-2][1])
     final = json.loads(publisher.messages[-1][1])
     assert removal["components"]["error_code"] == {"platform": "sensor"}
+    assert removal["components"]["human_detection"] == {"platform": "binary_sensor"}
     assert "error_code" not in final["components"]
+    assert "human_detection" not in final["components"]
 
 
 @pytest.mark.asyncio
@@ -191,5 +195,6 @@ async def test_migrates_legacy_index_and_removes_old_default_diagnostics(
     assert {
         "demand": {"platform": "sensor"},
         "error_code": {"platform": "sensor"},
+        "human_detection": {"platform": "binary_sensor"},
         "power_consumption": {"platform": "sensor"},
     }.items() <= removal["components"].items()
