@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import time
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -7,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from airstage2mqtt.airstage import DeviceSnapshot, UnitError
+from airstage2mqtt.airstage import AcceptedCommand, DeviceSnapshot, UnitError
 from airstage2mqtt.config import AppConfig, UnitConfig
 from airstage2mqtt.service import BridgeService, UnitWorker, healthcheck
 
@@ -16,15 +17,32 @@ class FakeAdapter:
     def __init__(self, results: list[DeviceSnapshot | Exception]) -> None:
         self.results = results
         self.commands: list[dict[str, object]] = []
+        self.refresh_count = 0
+        self.refreshed = asyncio.Event()
 
     async def refresh(self) -> DeviceSnapshot:
+        self.refresh_count += 1
+        self.refreshed.set()
         result = self.results.pop(0) if len(self.results) > 1 else self.results[0]
         if isinstance(result, Exception):
             raise result
         return result
 
-    async def apply(self, command: dict[str, object], current: DeviceSnapshot | None) -> None:
-        self.commands.append(command)
+    def accept(self, command: dict[str, object], current: DeviceSnapshot) -> AcceptedCommand:
+        state = {**current.state, **command}
+        return AcceptedCommand(
+            values=dict(command),
+            snapshot=DeviceSnapshot(state, current.capabilities, current.model),
+        )
+
+    async def apply(self, command: AcceptedCommand) -> None:
+        self.commands.append(command.values)
+
+
+class FailingWriteAdapter(FakeAdapter):
+    async def apply(self, command: AcceptedCommand) -> None:
+        await super().apply(command)
+        raise UnitError("write failed")
 
 
 class FakeMqttClient:
@@ -70,13 +88,25 @@ async def test_worker_marks_offline_without_raising(unit_config: UnitConfig) -> 
 
 
 @pytest.mark.asyncio
-async def test_worker_serializes_command_and_confirmed_refresh(unit_config: UnitConfig) -> None:
-    before = DeviceSnapshot({"state": "OFF"}, frozenset({"state"}), "test")
-    after = DeviceSnapshot({"state": "ON"}, frozenset({"state"}), "test")
+async def test_worker_publishes_optimistic_state_before_write_then_reconciles(
+    unit_config: UnitConfig,
+) -> None:
+    before = DeviceSnapshot(
+        {"state": "ON", "target_temperature": 20.0},
+        frozenset({"state", "target_temperature"}),
+        "test",
+    )
+    after = DeviceSnapshot(
+        {"state": "ON", "target_temperature": 21.5},
+        before.capabilities,
+        "test",
+    )
     adapter = FakeAdapter([after])
     states: list[DeviceSnapshot] = []
 
     async def on_state(_unit: UnitConfig, state: DeviceSnapshot) -> None:
+        if not states:
+            assert adapter.commands == []
         states.append(state)
 
     async def on_availability(_unit: UnitConfig, _available: bool) -> None:
@@ -90,11 +120,197 @@ async def test_worker_serializes_command_and_confirmed_refresh(unit_config: Unit
         on_snapshot=on_state,
         on_availability=on_availability,
         initial_snapshot=before,
+        command_refresh_delay=0.01,
+    )
+    await worker.handle_command({"target_temperature": 21.5})
+
+    assert adapter.commands == [{"target_temperature": 21.5}]
+    assert states == [after]
+    assert adapter.refresh_count == 0
+
+    run_task = asyncio.create_task(worker.run())
+    try:
+        await asyncio.wait_for(adapter.refreshed.wait(), timeout=1)
+    finally:
+        run_task.cancel()
+        await asyncio.gather(run_task, return_exceptions=True)
+
+    assert adapter.refresh_count == 1
+    assert states == [after, after]
+
+
+@pytest.mark.asyncio
+async def test_matching_reconciliation_does_not_republish_mqtt_state(
+    app_config: AppConfig, unit_config: UnitConfig
+) -> None:
+    before = DeviceSnapshot(
+        {"state": "ON", "target_temperature": 20.0},
+        frozenset({"state", "target_temperature"}),
+        "test",
+    )
+    after = DeviceSnapshot(
+        {"state": "ON", "target_temperature": 21.5},
+        before.capabilities,
+        "test",
+    )
+    adapter = FakeAdapter([after])
+    client = FakeMqttClient([])
+    service = BridgeService(app_config)
+
+    async def on_state(selected: UnitConfig, snapshot: DeviceSnapshot) -> None:
+        await service._publish_snapshot(client, selected, snapshot)  # type: ignore[arg-type]
+
+    async def on_availability(_unit: UnitConfig, _available: bool) -> None:
+        return None
+
+    worker = UnitWorker(
+        unit_config,
+        adapter,
+        interval=10,
+        offline_after_failures=2,
+        on_snapshot=on_state,
+        on_availability=on_availability,
+        initial_snapshot=before,
+        command_refresh_delay=0.01,
+    )
+    await service._publish_snapshot(client, unit_config, before)  # type: ignore[arg-type]
+    await worker.handle_command({"target_temperature": 21.5})
+
+    run_task = asyncio.create_task(worker.run())
+    try:
+        await asyncio.wait_for(adapter.refreshed.wait(), timeout=1)
+    finally:
+        run_task.cancel()
+        await asyncio.gather(run_task, return_exceptions=True)
+
+    state_messages = [
+        payload
+        for topic, payload, *_ in client.published
+        if topic == "airstage2mqtt/living_room"
+    ]
+    assert len(state_messages) == 2
+
+
+@pytest.mark.asyncio
+async def test_mismatching_reconciliation_publishes_corrected_mqtt_state(
+    app_config: AppConfig, unit_config: UnitConfig
+) -> None:
+    before = DeviceSnapshot(
+        {"state": "ON", "target_temperature": 20.0},
+        frozenset({"state", "target_temperature"}),
+        "test",
+    )
+    corrected = DeviceSnapshot(
+        {"state": "ON", "target_temperature": 21.0},
+        before.capabilities,
+        "test",
+    )
+    adapter = FakeAdapter([corrected])
+    client = FakeMqttClient([])
+    service = BridgeService(app_config)
+
+    async def on_state(selected: UnitConfig, snapshot: DeviceSnapshot) -> None:
+        await service._publish_snapshot(client, selected, snapshot)  # type: ignore[arg-type]
+
+    async def on_availability(_unit: UnitConfig, _available: bool) -> None:
+        return None
+
+    worker = UnitWorker(
+        unit_config,
+        adapter,
+        interval=10,
+        offline_after_failures=2,
+        on_snapshot=on_state,
+        on_availability=on_availability,
+        initial_snapshot=before,
+        command_refresh_delay=0.01,
+    )
+    await service._publish_snapshot(client, unit_config, before)  # type: ignore[arg-type]
+    await worker.handle_command({"target_temperature": 21.5})
+
+    run_task = asyncio.create_task(worker.run())
+    try:
+        await asyncio.wait_for(adapter.refreshed.wait(), timeout=1)
+    finally:
+        run_task.cancel()
+        await asyncio.gather(run_task, return_exceptions=True)
+
+    state_messages = [
+        payload
+        for topic, payload, *_ in client.published
+        if topic == "airstage2mqtt/living_room"
+    ]
+    assert len(state_messages) == 3
+    assert '"target_temperature":21.0' in state_messages[-1]
+
+
+@pytest.mark.asyncio
+async def test_explicit_refresh_overrides_delayed_reconciliation(unit_config: UnitConfig) -> None:
+    before = DeviceSnapshot({"state": "OFF"}, frozenset({"state"}), "test")
+    after = DeviceSnapshot({"state": "ON"}, before.capabilities, "test")
+    adapter = FakeAdapter([after])
+
+    async def on_state(_unit: UnitConfig, _state: DeviceSnapshot) -> None:
+        return None
+
+    async def on_availability(_unit: UnitConfig, _available: bool) -> None:
+        return None
+
+    worker = UnitWorker(
+        unit_config,
+        adapter,
+        interval=10,
+        offline_after_failures=2,
+        on_snapshot=on_state,
+        on_availability=on_availability,
+        initial_snapshot=before,
+        command_refresh_delay=60,
+    )
+    await worker.handle_command({"state": "ON"})
+    worker.request_refresh()
+
+    run_task = asyncio.create_task(worker.run())
+    try:
+        await asyncio.wait_for(adapter.refreshed.wait(), timeout=1)
+    finally:
+        run_task.cancel()
+        await asyncio.gather(run_task, return_exceptions=True)
+
+    assert adapter.refresh_count == 1
+
+
+@pytest.mark.asyncio
+async def test_failed_write_still_schedules_reconciliation(unit_config: UnitConfig) -> None:
+    before = DeviceSnapshot({"state": "OFF"}, frozenset({"state"}), "test")
+    adapter = FailingWriteAdapter([before])
+    states: list[DeviceSnapshot] = []
+
+    async def on_state(_unit: UnitConfig, snapshot: DeviceSnapshot) -> None:
+        states.append(snapshot)
+
+    async def on_availability(_unit: UnitConfig, _available: bool) -> None:
+        return None
+
+    worker = UnitWorker(
+        unit_config,
+        adapter,
+        interval=10,
+        offline_after_failures=2,
+        on_snapshot=on_state,
+        on_availability=on_availability,
+        initial_snapshot=before,
+        command_refresh_delay=0.01,
     )
     await worker.handle_command({"state": "ON"})
 
-    assert adapter.commands == [{"state": "ON"}]
-    assert states == [after]
+    run_task = asyncio.create_task(worker.run())
+    try:
+        await asyncio.wait_for(adapter.refreshed.wait(), timeout=1)
+    finally:
+        run_task.cancel()
+        await asyncio.gather(run_task, return_exceptions=True)
+
+    assert [snapshot.state["state"] for snapshot in states] == ["ON", "OFF"]
 
 
 @pytest.mark.asyncio

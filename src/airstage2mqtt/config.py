@@ -41,6 +41,7 @@ class MqttConfig:
 @dataclass(frozen=True, slots=True)
 class PollingConfig:
     interval_seconds: float = 10
+    command_refresh_delay_seconds: float = 2
     timeout_seconds: int = 20
     retries: int = 5
     offline_after_failures: int = 2
@@ -243,6 +244,11 @@ def load_config(
     polling_raw = _mapping(raw.get("polling"), "polling")
     polling = PollingConfig(
         interval_seconds=_number(polling_raw.get("interval_seconds", 10), "polling interval", 1),
+        command_refresh_delay_seconds=_number(
+            polling_raw.get("command_refresh_delay_seconds", 2),
+            "command refresh delay",
+            0.1,
+        ),
         timeout_seconds=_integer(polling_raw.get("timeout_seconds", 20), "polling timeout", 1),
         retries=_integer(polling_raw.get("retries", 5), "polling retries", 1),
         offline_after_failures=_integer(

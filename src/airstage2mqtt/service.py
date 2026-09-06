@@ -59,6 +59,7 @@ class UnitWorker:
         on_snapshot: SnapshotCallback,
         on_availability: AvailabilityCallback,
         initial_snapshot: DeviceSnapshot | None = None,
+        command_refresh_delay: float = 2,
     ) -> None:
         self.config = config
         self.adapter = adapter
@@ -67,27 +68,58 @@ class UnitWorker:
         self.on_snapshot = on_snapshot
         self.on_availability = on_availability
         self.snapshot = initial_snapshot
+        self.command_refresh_delay = command_refresh_delay
         self._lock = asyncio.Lock()
-        self._refresh = asyncio.Event()
+        self._schedule_changed = asyncio.Event()
+        self._poll_deadline: float | None = None
+        self._refresh_requested = False
         self._failures = 0
         self._available: bool | None = None
 
     async def run(self) -> None:
+        if self._poll_deadline is None:
+            self._schedule_poll(self.interval)
         while True:
+            deadline = self._poll_deadline
+            if deadline is None:
+                await self._schedule_changed.wait()
+                self._schedule_changed.clear()
+                continue
+            delay = max(0.0, deadline - asyncio.get_running_loop().time())
             try:
-                await asyncio.wait_for(self._refresh.wait(), timeout=self.interval)
-                self._refresh.clear()
+                await asyncio.wait_for(self._schedule_changed.wait(), timeout=delay)
             except TimeoutError:
                 pass
-            await self.poll()
+            else:
+                self._schedule_changed.clear()
+                continue
+
+            async with self._lock:
+                if self._poll_deadline != deadline:
+                    continue
+                self._poll_deadline = None
+                self._refresh_requested = False
+                await self._poll_locked()
+                if self._poll_deadline is None:
+                    self._schedule_poll(self.interval)
 
     async def initialise(self) -> None:
         """Perform the first poll and establish an explicit availability result."""
         async with self._lock:
             await self._poll_locked(initial=True)
+            self._schedule_poll(self.interval)
 
     def request_refresh(self) -> None:
-        self._refresh.set()
+        self._refresh_requested = True
+        self._schedule_poll(0)
+
+    def _schedule_poll(self, delay: float) -> None:
+        self._poll_deadline = asyncio.get_running_loop().time() + delay
+        self._schedule_changed.set()
+
+    def _cancel_scheduled_poll(self) -> None:
+        self._poll_deadline = None
+        self._schedule_changed.set()
 
     async def poll(self) -> None:
         async with self._lock:
@@ -120,15 +152,32 @@ class UnitWorker:
             await self.on_availability(self.config, True)
 
     async def handle_command(self, command: dict[str, object]) -> None:
+        self._cancel_scheduled_poll()
         async with self._lock:
+            accepted = False
             try:
-                await self.adapter.apply(command, self.snapshot)
-                await self._poll_locked()
+                if self.snapshot is None:
+                    self.snapshot = await self.adapter.refresh()
+                prepared = self.adapter.accept(command, self.snapshot)
+                self.snapshot = prepared.snapshot
+                accepted = True
+                await self.on_snapshot(self.config, prepared.snapshot)
+                await self.adapter.apply(prepared)
+                self._failures = 0
+                if self._available is not True:
+                    self._available = True
+                    await self.on_availability(self.config, True)
             except CommandError as exc:
-                _LOGGER.warning("Rejected command for %s: %s", self.config.name, exc)
+                action = "failed" if accepted else "rejected"
+                _LOGGER.warning("Command %s for %s: %s", action, self.config.name, exc)
             except Exception as exc:
                 # Keep malformed hardware responses and third-party errors isolated to this unit.
                 _LOGGER.error("Command failed for %s: %s", self.config.name, exc)
+            finally:
+                delay = 0 if self._refresh_requested else (
+                    self.command_refresh_delay if accepted else self.interval
+                )
+                self._schedule_poll(delay)
 
 
 class BridgeService:
@@ -304,6 +353,7 @@ class BridgeService:
                 on_snapshot=on_snapshot,
                 on_availability=on_availability,
                 initial_snapshot=self._snapshots.get(unit.name),
+                command_refresh_delay=self.config.polling.command_refresh_delay_seconds,
             )
         return workers
 

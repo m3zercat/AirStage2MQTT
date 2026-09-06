@@ -11,6 +11,7 @@ bridge:
   key: testbridge001
 polling:
   interval_seconds: 15
+  command_refresh_delay_seconds: 1.5
 homeassistant:
   enabled: true
 units:
@@ -77,6 +78,7 @@ def test_derives_friendly_name_from_topic_name(tmp_path: Path) -> None:
 
     assert config.units[0].friendly_name is None
     assert config.units[0].display_name == "Living Room"
+    assert config.polling.command_refresh_delay_seconds == 1.5
 
 
 def test_diagnostics_are_disabled_by_default(tmp_path: Path) -> None:

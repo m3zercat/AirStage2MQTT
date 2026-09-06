@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -33,12 +34,22 @@ class DeviceSnapshot:
     model: str
 
 
+@dataclass(frozen=True, slots=True)
+class AcceptedCommand:
+    """A validated command and the optimistic state it produces."""
+
+    values: dict[str, object]
+    snapshot: DeviceSnapshot
+
+
 class UnitAdapter(Protocol):
     """Interface used by the MQTT worker and test doubles."""
 
     async def refresh(self) -> DeviceSnapshot: ...
 
-    async def apply(self, command: dict[str, object], current: DeviceSnapshot | None) -> None: ...
+    def accept(self, command: dict[str, object], current: DeviceSnapshot) -> AcceptedCommand: ...
+
+    async def apply(self, command: AcceptedCommand) -> None: ...
 
 
 def _normalized_enum(value: object) -> str:
@@ -103,6 +114,12 @@ class PyairstageLocalUnit:
         constants.ACParameter.SIGN_RESET.value: "filter_sign_reset",
     }
     _CONFIGURABLE_DIAGNOSTICS = DIAGNOSTIC_FIELDS
+    _TEMPERATURE_RANGES = {
+        "auto": (constants.ACConstants.AUTO_MIN_TEMP, constants.ACConstants.AUTO_MAX_TEMP),
+        "cool": (constants.ACConstants.COOL_MIN_TEMP, constants.ACConstants.COOL_MAX_TEMP),
+        "dry": (constants.ACConstants.DRY_MIN_TEMP, constants.ACConstants.DRY_MAX_TEMP),
+        "heat": (constants.ACConstants.HEAT_MIN_TEMP, constants.ACConstants.HEAT_MAX_TEMP),
+    }
 
     def __init__(
         self,
@@ -217,7 +234,7 @@ class PyairstageLocalUnit:
         self._capabilities = capabilities
         return DeviceSnapshot(state=state, capabilities=frozenset(capabilities), model=model)
 
-    async def apply(self, command: dict[str, object], current: DeviceSnapshot | None) -> None:
+    def accept(self, command: dict[str, object], current: DeviceSnapshot) -> AcceptedCommand:
         if not command:
             raise CommandError("command must contain at least one property")
         unknown = set(command) - {
@@ -230,27 +247,29 @@ class PyairstageLocalUnit:
         }
         if unknown:
             raise CommandError(f"unknown or read-only properties: {', '.join(sorted(unknown))}")
-        if current is None:
-            current = await self.refresh()
         unsupported = set(command) - current.capabilities
         # Power and mode are fundamental even if a malformed prior snapshot omitted them.
         unsupported -= {"state", "mode"}
         if unsupported:
             raise CommandError(f"unsupported properties: {', '.join(sorted(unsupported))}")
 
-        ac = await self._current_ac()
-        requested_state = command.get("state")
+        values: dict[str, object] = {}
+        state = dict(current.state)
+        working_power = state.get("state") == "ON"
         turn_off_last = False
+
+        requested_state = command.get("state")
         if requested_state is not None:
             state_text = str(requested_state).strip().upper()
             if state_text == "TOGGLE":
                 state_text = "OFF" if current.state.get("state") == "ON" else "ON"
             if state_text == "ON":
-                await ac.turn_on()
+                working_power = True
             elif state_text == "OFF":
                 turn_off_last = True
             else:
                 raise CommandError("state must be ON, OFF, or TOGGLE")
+            values["state"] = state_text
 
         mode_value = command.get("mode")
         if mode_value is not None:
@@ -258,17 +277,16 @@ class PyairstageLocalUnit:
             if mode == "off":
                 turn_off_last = True
             else:
-                library_mode = self._MODE_TO_LIBRARY.get(mode)
-                if library_mode is None:
+                if mode not in self._MODE_TO_LIBRARY:
                     raise CommandError("mode must be off, auto, cool, dry, fan_only, or heat")
-                if str(ac.get_device_on_off_state()).upper() == "OFF":
-                    await ac.turn_on()
-                await ac.set_operation_mode(library_mode)
+                mode = "fan_only" if mode == "fan" else mode
+                working_power = True
+            values["mode"] = mode
 
         if "target_temperature" in command:
-            if str(ac.get_device_on_off_state()).upper() == "OFF":
+            if not working_power:
                 if self.config.turn_on_before_set_temperature:
-                    await ac.turn_on()
+                    working_power = True
                 else:
                     raise CommandError(
                         "target_temperature cannot be set while the unit is off; "
@@ -278,22 +296,33 @@ class PyairstageLocalUnit:
                 target = float(str(command["target_temperature"]))
             except (TypeError, ValueError) as exc:
                 raise CommandError("target_temperature must be numeric") from exc
-            try:
-                await ac.set_target_temperature(target)
-            except AirstageACError as exc:
-                raise CommandError(str(exc)) from exc
+            if not math.isfinite(target):
+                raise CommandError("target_temperature must be finite")
+            requested_mode = values.get("mode")
+            effective_mode = str(
+                requested_mode
+                if requested_mode is not None and requested_mode != "off"
+                else state.get("mode", "")
+            )
+            if effective_mode == "fan_only":
+                raise CommandError("target_temperature cannot be set in fan_only mode")
+            limits = self._TEMPERATURE_RANGES.get(effective_mode)
+            if limits is not None and not limits[0] <= target <= limits[1]:
+                raise CommandError(
+                    f"target_temperature must be between {limits[0]} and {limits[1]} "
+                    f"in {effective_mode} mode"
+                )
+            values["target_temperature"] = round(target * 2) / 2
 
         if "fan_mode" in command:
-            fan = self._FAN_TO_LIBRARY.get(_normalized_enum(command["fan_mode"]))
-            if fan is None:
+            fan = _normalized_enum(command["fan_mode"])
+            if fan not in self._FAN_TO_LIBRARY:
                 raise CommandError("fan_mode must be auto, quiet, low, medium, or high")
-            await ac.set_fan_speed(fan)
+            values["fan_mode"] = fan
 
         if "swing_mode" in command:
             swing = _normalized_enum(command["swing_mode"])
-            if swing == "vertical_swing":
-                await ac.set_vertical_swing(constants.BooleanProperty.ON)
-            else:
+            if swing != "vertical_swing":
                 positions = {
                     _normalized_enum(position): position
                     for position in constants.VerticalSwingPositions
@@ -303,12 +332,81 @@ class PyairstageLocalUnit:
                     raise CommandError(
                         "swing_mode must be vertical_swing or a supported vertical position"
                     )
+            values["swing_mode"] = swing
+
+        for field in self._BOOLEAN_SETTERS:
+            if field in command:
+                boolean = _on_off(command[field], field)
+                values[field] = "ON" if boolean is constants.BooleanProperty.ON else "OFF"
+
+        state.update(values)
+        state["state"] = "ON" if working_power else "OFF"
+
+        if turn_off_last:
+            state["state"] = "OFF"
+            state["mode"] = "off"
+
+        return AcceptedCommand(
+            values=values,
+            snapshot=DeviceSnapshot(
+                state=state,
+                capabilities=current.capabilities,
+                model=current.model,
+            ),
+        )
+
+    async def apply(self, command: AcceptedCommand) -> None:
+        ac = await self._current_ac()
+        values = command.values
+        requested_state = values.get("state")
+        turn_off_last = False
+        if requested_state == "ON":
+            await ac.turn_on()
+        elif requested_state == "OFF":
+            turn_off_last = True
+
+        mode = values.get("mode")
+        if mode is not None:
+            if mode == "off":
+                turn_off_last = True
+            else:
+                library_mode = self._MODE_TO_LIBRARY[str(mode)]
+                if str(ac.get_device_on_off_state()).upper() == "OFF":
+                    await ac.turn_on()
+                await ac.set_operation_mode(library_mode)
+
+        if "target_temperature" in values:
+            if str(ac.get_device_on_off_state()).upper() == "OFF":
+                if self.config.turn_on_before_set_temperature:
+                    await ac.turn_on()
+                else:
+                    raise CommandError(
+                        "target_temperature cannot be set while the unit is off; "
+                        "enable turn_on_before_set_temperature or send state=ON"
+                    )
+            try:
+                await ac.set_target_temperature(float(str(values["target_temperature"])))
+            except AirstageACError as exc:
+                raise CommandError(str(exc)) from exc
+
+        if "fan_mode" in values:
+            await ac.set_fan_speed(self._FAN_TO_LIBRARY[str(values["fan_mode"])])
+
+        if "swing_mode" in values:
+            swing = str(values["swing_mode"])
+            if swing == "vertical_swing":
+                await ac.set_vertical_swing(constants.BooleanProperty.ON)
+            else:
+                positions = {
+                    _normalized_enum(position): position
+                    for position in constants.VerticalSwingPositions
+                }
                 await ac.set_vertical_swing(constants.BooleanProperty.OFF)
-                await ac.set_vertical_direction(position)
+                await ac.set_vertical_direction(positions[swing])
 
         for field, setter_name in self._BOOLEAN_SETTERS.items():
-            if field in command:
-                await getattr(ac, setter_name)(_on_off(command[field], field))
+            if field in values:
+                await getattr(ac, setter_name)(_on_off(values[field], field))
 
         if turn_off_last:
             await ac.turn_off()

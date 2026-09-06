@@ -197,10 +197,11 @@ async def test_applies_multi_property_command_in_safe_order(
         model="test",
     )
 
-    await adapter.apply(
+    accepted = adapter.accept(
         {"state": "ON", "mode": "heat", "target_temperature": 21.5, "economy": "ON"},
         snapshot,
     )
+    await adapter.apply(accepted)
 
     assert [name for name, _ in ac.calls] == [
         "turn_on",
@@ -208,6 +209,12 @@ async def test_applies_multi_property_command_in_safe_order(
         "temperature",
         "set_economy_mode",
     ]
+    assert accepted.snapshot.state == {
+        "state": "ON",
+        "mode": "heat",
+        "target_temperature": 21.5,
+        "economy": "ON",
+    }
 
 
 @pytest.mark.asyncio
@@ -220,6 +227,71 @@ async def test_rejects_read_only_and_unsupported_commands(monkeypatch: pytest.Mo
         model="test",
     )
     with pytest.raises(CommandError, match="read-only"):
-        await adapter.apply({"current_temperature": 99}, snapshot)
+        adapter.accept({"current_temperature": 99}, snapshot)
     with pytest.raises(CommandError, match="unsupported"):
-        await adapter.apply({"economy": "ON"}, snapshot)
+        adapter.accept({"economy": "ON"}, snapshot)
+
+
+def test_models_canonical_command_values_and_power_side_effects() -> None:
+    adapter = object.__new__(PyairstageLocalUnit)
+    adapter.config = UnitConfig("living_room", DEVICE_ID, "192.168.1.40")
+    snapshot = DeviceSnapshot(
+        state={
+            "state": "ON",
+            "mode": "cool",
+            "fan_mode": "medium",
+            "target_temperature": 20.0,
+            "economy": "OFF",
+            "current_temperature": 21.0,
+        },
+        capabilities=frozenset(
+            {"state", "mode", "fan_mode", "target_temperature", "economy"}
+        ),
+        model="test",
+    )
+
+    accepted = adapter.accept(
+        {
+            "state": "toggle",
+            "mode": "fan",
+            "fan_mode": "High",
+            "economy": True,
+        },
+        snapshot,
+    )
+
+    assert accepted.values == {
+        "state": "OFF",
+        "mode": "fan_only",
+        "fan_mode": "high",
+        "economy": "ON",
+    }
+    assert accepted.snapshot.state == {
+        "state": "OFF",
+        "mode": "off",
+        "fan_mode": "high",
+        "target_temperature": 20.0,
+        "economy": "ON",
+        "current_temperature": 21.0,
+    }
+    assert accepted.snapshot.capabilities == snapshot.capabilities
+    assert accepted.snapshot.model == snapshot.model
+
+
+def test_validates_temperature_before_publishing_optimistic_state() -> None:
+    adapter = object.__new__(PyairstageLocalUnit)
+    adapter.config = UnitConfig("living_room", DEVICE_ID, "192.168.1.40")
+    snapshot = DeviceSnapshot(
+        state={"state": "ON", "mode": "cool", "target_temperature": 20.0},
+        capabilities=frozenset({"state", "mode", "target_temperature"}),
+        model="test",
+    )
+
+    with pytest.raises(CommandError, match="between 18.0 and 30.0"):
+        adapter.accept({"mode": "off", "target_temperature": 16}, snapshot)
+    with pytest.raises(CommandError, match="fan_only"):
+        adapter.accept({"mode": "fan_only", "target_temperature": 20}, snapshot)
+
+    accepted = adapter.accept({"mode": "heat", "target_temperature": 17.9}, snapshot)
+    assert accepted.values["target_temperature"] == 18.0
+    assert accepted.snapshot.state["target_temperature"] == 18.0

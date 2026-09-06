@@ -96,6 +96,7 @@ mqtt:
 
 polling:
   interval_seconds: 10
+  command_refresh_delay_seconds: 2
   timeout_seconds: 20
   retries: 5
   offline_after_failures: 2
@@ -141,6 +142,10 @@ must also be unique between bridge instances that share the same base topic.
 automatically powers on an off unit or is rejected. `mqtt.base_topic` controls the shared
 operational MQTT topic prefix; it must not contain MQTT wildcards.
 
+`polling.command_refresh_delay_seconds` controls how long AirStage2MQTT waits after a command
+write before polling the unit to reconcile its actual state. Each new command restarts this short
+delay; after reconciliation, polling returns to `polling.interval_seconds`.
+
 `diagnostics.enabled` is an optional per-unit list containing `error_code`, `demand`, and/or
 `power_consumption`. If `diagnostics`, `enabled`, or the list itself is omitted or empty, all
 three are disabled. Disabled diagnostics are omitted from both MQTT state and Home Assistant
@@ -178,7 +183,8 @@ Subscribe to everything:
 mosquitto_sub -h MQTT_HOST -u USERNAME -P PASSWORD -v -t 'airstage2mqtt/#'
 ```
 
-Set several properties and wait for the confirmed state publication:
+Set several properties. AirStage2MQTT immediately publishes the accepted, modeled state before
+writing it to the unit:
 
 ```sh
 mosquitto_pub -h MQTT_HOST -u USERNAME -P PASSWORD \
@@ -198,10 +204,15 @@ Request a refresh:
 mosquitto_pub -h MQTT_HOST -t 'airstage2mqtt/living_room/get' -n
 ```
 
-The retained unit JSON and bridge information are published after connection and then only when
-their normalized content changes. Polling still occurs at the configured interval: suppressing
-unchanged MQTT messages does not reduce hardware monitoring. Availability is likewise published
-on transitions rather than on every poll.
+After a command, the pending scheduled poll is replaced by a reconciliation poll after
+`command_refresh_delay_seconds`. If the unit reports the modeled state, the unchanged MQTT message
+is suppressed; if it reports something different, the retained state is corrected. The regular
+polling interval resumes after reconciliation. An explicit `/get` requests the next poll as soon
+as any active write finishes.
+
+Retained unit JSON and bridge information are otherwise published only when their normalized
+content changes. Suppressing unchanged MQTT messages does not reduce hardware monitoring.
+Availability is likewise published on transitions rather than on every poll.
 
 ### Properties
 

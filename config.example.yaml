@@ -8,6 +8,7 @@ mqtt:
 
 polling:
   interval_seconds: 10
+  command_refresh_delay_seconds: 2
   timeout_seconds: 20
   retries: 5
   offline_after_failures: 2
