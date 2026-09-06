@@ -7,6 +7,10 @@ Zigbee2MQTT-style commands, and can optionally publish Home Assistant MQTT disco
 Fujitsu cloud accounts and APIs are not used. Home Assistant is optional: any MQTT client can
 monitor or control the units.
 
+For component boundaries, MQTT ownership, persistence, and Mermaid process diagrams covering
+startup, polling, commands, reconnects, and Home Assistant discovery, see the
+[architecture guide](docs/architecture.md).
+
 ## Requirements
 
 - A Linux Docker host, or Python 3.12 or newer for direct execution.
