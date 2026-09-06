@@ -174,8 +174,10 @@ class UnitWorker:
                 # Keep malformed hardware responses and third-party errors isolated to this unit.
                 _LOGGER.error("Command failed for %s: %s", self.config.name, exc)
             finally:
-                delay = 0 if self._refresh_requested else (
-                    self.command_refresh_delay if accepted else self.interval
+                delay = (
+                    0
+                    if self._refresh_requested
+                    else (self.command_refresh_delay if accepted else self.interval)
                 )
                 self._schedule_poll(delay)
 

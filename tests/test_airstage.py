@@ -244,9 +244,7 @@ def test_models_canonical_command_values_and_power_side_effects() -> None:
             "economy": "OFF",
             "current_temperature": 21.0,
         },
-        capabilities=frozenset(
-            {"state", "mode", "fan_mode", "target_temperature", "economy"}
-        ),
+        capabilities=frozenset({"state", "mode", "fan_mode", "target_temperature", "economy"}),
         model="test",
     )
 

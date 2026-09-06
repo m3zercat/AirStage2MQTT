@@ -184,9 +184,7 @@ async def test_matching_reconciliation_does_not_republish_mqtt_state(
         await asyncio.gather(run_task, return_exceptions=True)
 
     state_messages = [
-        payload
-        for topic, payload, *_ in client.published
-        if topic == "airstage2mqtt/living_room"
+        payload for topic, payload, *_ in client.published if topic == "airstage2mqtt/living_room"
     ]
     assert len(state_messages) == 2
 
@@ -236,9 +234,7 @@ async def test_mismatching_reconciliation_publishes_corrected_mqtt_state(
         await asyncio.gather(run_task, return_exceptions=True)
 
     state_messages = [
-        payload
-        for topic, payload, *_ in client.published
-        if topic == "airstage2mqtt/living_room"
+        payload for topic, payload, *_ in client.published if topic == "airstage2mqtt/living_room"
     ]
     assert len(state_messages) == 3
     assert '"target_temperature":21.0' in state_messages[-1]
