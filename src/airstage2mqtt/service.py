@@ -70,17 +70,21 @@ class UnitWorker:
         self._lock = asyncio.Lock()
         self._refresh = asyncio.Event()
         self._failures = 0
-        self._available = False
+        self._available: bool | None = None
 
     async def run(self) -> None:
-        await self.on_availability(self.config, False)
         while True:
-            await self.poll()
             try:
                 await asyncio.wait_for(self._refresh.wait(), timeout=self.interval)
                 self._refresh.clear()
             except TimeoutError:
                 pass
+            await self.poll()
+
+    async def initialise(self) -> None:
+        """Perform the first poll and establish an explicit availability result."""
+        async with self._lock:
+            await self._poll_locked(initial=True)
 
     def request_refresh(self) -> None:
         self._refresh.set()
@@ -89,7 +93,7 @@ class UnitWorker:
         async with self._lock:
             await self._poll_locked()
 
-    async def _poll_locked(self) -> None:
+    async def _poll_locked(self, *, initial: bool = False) -> None:
         try:
             snapshot = await self.adapter.refresh()
         except Exception as exc:  # Unit adapters also surface low-level library exceptions.
@@ -101,16 +105,19 @@ class UnitWorker:
                 self.offline_after_failures,
                 exc,
             )
-            if self._failures >= self.offline_after_failures and self._available:
+            if initial and self._available is None:
+                self._available = False
+                await self.on_availability(self.config, False)
+            elif self._failures >= self.offline_after_failures and self._available is True:
                 self._available = False
                 await self.on_availability(self.config, False)
             return
         self.snapshot = snapshot
         self._failures = 0
-        if not self._available:
+        await self.on_snapshot(self.config, snapshot)
+        if self._available is not True:
             self._available = True
             await self.on_availability(self.config, True)
-        await self.on_snapshot(self.config, snapshot)
 
     async def handle_command(self, command: dict[str, object]) -> None:
         async with self._lock:
@@ -135,7 +142,11 @@ class BridgeService:
         health_path = os.getenv("A2M_HEALTH_FILE", "/tmp/airstage2mqtt-health")
         self.health = HealthReporter(Path(health_path))
         self._snapshots: dict[str, DeviceSnapshot] = {}
+        self._published_states: dict[str, str] = {}
+        self._published_availability: dict[str, bool] = {}
+        self._published_bridge_info: str | None = None
         self._command_tasks: set[asyncio.Task[None]] = set()
+        self._ready = False
 
     def stop(self) -> None:
         self.stop_event.set()
@@ -182,22 +193,26 @@ class BridgeService:
             tls_insecure=mqtt.tls_insecure if mqtt.tls else None,
         ) as client:
             _LOGGER.info("Connected to MQTT broker %s:%s", mqtt.host, mqtt.port)
+            self._ready = False
+            self._published_states.clear()
+            self._published_availability.clear()
+            self._published_bridge_info = None
+            self.discovery.connection_reset()
+            await self._publish_bridge_state(client, "initializing")
             previous_manifest = await self._read_retained_manifest(client)
             await client.subscribe(f"{mqtt.base_topic}/+/set", qos=mqtt.qos)
             await client.subscribe(f"{mqtt.base_topic}/+/set/+", qos=mqtt.qos)
             await client.subscribe(f"{mqtt.base_topic}/+/get", qos=mqtt.qos)
             if self.config.homeassistant.enabled:
                 await client.subscribe("homeassistant/status", qos=mqtt.qos)
-            await client.publish(bridge_state_topic, "online", qos=mqtt.qos, retain=True)
-            self.discovery.connection_reset()
             await self.manifest.reconcile(client, previous_manifest)
             await self.discovery.reconcile(client)
             await self.manifest.publish(client)
-            await self._publish_bridge_info(client)
-            self.health.online()
 
             async with aiohttp.ClientSession() as session:
                 workers = self._create_workers(session, client)
+                await self._establish_initial_state(client, workers)
+                self.health.online()
                 worker_tasks = {
                     asyncio.create_task(worker.run(), name=f"poll-{name}")
                     for name, worker in workers.items()
@@ -226,13 +241,13 @@ class BridgeService:
                     task.cancel()
                 await asyncio.gather(*pending, *self._command_tasks, return_exceptions=True)
                 self._command_tasks.clear()
+                self._ready = False
+                await self._publish_bridge_state(client, "offline")
+                if self.stop_event.is_set():
+                    for unit in self.config.units:
+                        await self._publish_availability(client, unit, False)
                 if task_error is not None:
                     raise task_error
-
-            if self.stop_event.is_set():
-                for unit in self.config.units:
-                    await self._publish_availability(client, unit, False)
-                await client.publish(bridge_state_topic, "offline", qos=mqtt.qos, retain=True)
 
     async def _read_retained_manifest(self, client: aiomqtt.Client) -> bytes | None:
         """Read the previous exact-key manifest before normal subscriptions start."""
@@ -267,16 +282,11 @@ class BridgeService:
                 mqtt_client: aiomqtt.Client = client,
             ) -> None:
                 self._snapshots[selected.name] = snapshot
-                payload = json.dumps(snapshot.state, separators=(",", ":"), sort_keys=True)
-                await mqtt_client.publish(
-                    f"{self.config.mqtt.base_topic}/{selected.name}",
-                    payload,
-                    qos=self.config.mqtt.qos,
-                    retain=True,
-                )
-                await self.discovery.publish(mqtt_client, selected, snapshot)
-                await self._publish_bridge_info(mqtt_client)
-                self.health.online()
+                await self._publish_snapshot(mqtt_client, selected, snapshot)
+                if self._ready:
+                    await self.discovery.publish(mqtt_client, selected, snapshot)
+                    await self._publish_bridge_info(mqtt_client)
+                    self.health.online()
 
             async def on_availability(
                 selected: UnitConfig,
@@ -297,15 +307,53 @@ class BridgeService:
             )
         return workers
 
+    async def _establish_initial_state(
+        self, client: aiomqtt.Client, workers: dict[str, UnitWorker]
+    ) -> None:
+        """Resolve every unit before exposing the bridge as ready."""
+        await asyncio.gather(*(worker.initialise() for worker in workers.values()))
+        for unit in self.config.units:
+            snapshot = self._snapshots.get(unit.name)
+            if snapshot is not None:
+                await self.discovery.publish(client, unit, snapshot)
+        await self._publish_bridge_info(client)
+        self._ready = True
+        await self._publish_bridge_state(client, "online")
+
+    async def _publish_snapshot(
+        self, client: aiomqtt.Client, unit: UnitConfig, snapshot: DeviceSnapshot
+    ) -> None:
+        payload = json.dumps(snapshot.state, separators=(",", ":"), sort_keys=True)
+        if self._published_states.get(unit.name) == payload:
+            return
+        await client.publish(
+            f"{self.config.mqtt.base_topic}/{unit.name}",
+            payload,
+            qos=self.config.mqtt.qos,
+            retain=True,
+        )
+        self._published_states[unit.name] = payload
+
+    async def _publish_bridge_state(self, client: aiomqtt.Client, state: str) -> None:
+        await client.publish(
+            f"{self.config.bridge_topic}/state",
+            state,
+            qos=self.config.mqtt.qos,
+            retain=True,
+        )
+
     async def _publish_availability(
         self, client: aiomqtt.Client, unit: UnitConfig, available: bool
     ) -> None:
+        if self._published_availability.get(unit.name) is available:
+            return
         await client.publish(
             f"{self.config.mqtt.base_topic}/{unit.name}/availability",
             "online" if available else "offline",
             qos=self.config.mqtt.qos,
             retain=True,
         )
+        self._published_availability[unit.name] = available
 
     async def _publish_bridge_info(self, client: aiomqtt.Client) -> None:
         devices = []
@@ -324,12 +372,16 @@ class BridgeService:
             "homeassistant": self.config.homeassistant.enabled,
             "devices": devices,
         }
+        encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+        if self._published_bridge_info == encoded:
+            return
         await client.publish(
             f"{self.config.bridge_topic}/info",
-            json.dumps(payload, separators=(",", ":"), sort_keys=True),
+            encoded,
             qos=self.config.mqtt.qos,
             retain=True,
         )
+        self._published_bridge_info = encoded
 
     async def _consume_messages(
         self, client: aiomqtt.Client, workers: dict[str, UnitWorker]

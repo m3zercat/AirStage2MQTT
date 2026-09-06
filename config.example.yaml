@@ -25,6 +25,13 @@ units:
     ip: "192.168.1.40"
     use_https: false
     turn_on_before_set_temperature: false
+    # Optional experimental raw diagnostics. Missing/empty means all disabled.
+    diagnostics:
+      enabled: []
+      # enabled:
+      #   - error_code
+      #   - demand
+      #   - power_consumption
 
   # - name: bedroom
   #   friendly_name: Main Bedroom Air Conditioner
@@ -32,3 +39,6 @@ units:
   #   ip: "192.168.1.41"
   #   use_https: false
   #   turn_on_before_set_temperature: true
+  #   diagnostics:
+  #     enabled:
+  #       - error_code

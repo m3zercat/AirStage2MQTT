@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -10,7 +11,9 @@ import pyairstage.airstageApi as airstage_api
 from pyairstage import constants
 from pyairstage.airstageAC import AirstageAC, AirstageACError
 
-from .config import PollingConfig, UnitConfig
+from .config import DIAGNOSTIC_FIELDS, PollingConfig, UnitConfig
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class UnitError(RuntimeError):
@@ -99,6 +102,7 @@ class PyairstageLocalUnit:
         constants.ACParameter.DEMAND.value: "demand",
         constants.ACParameter.SIGN_RESET.value: "filter_sign_reset",
     }
+    _CONFIGURABLE_DIAGNOSTICS = DIAGNOSTIC_FIELDS
 
     def __init__(
         self,
@@ -107,6 +111,8 @@ class PyairstageLocalUnit:
         session: aiohttp.ClientSession,
     ) -> None:
         self.config = config
+        self._capabilities: set[str] = set(config.diagnostics)
+        self._missing_diagnostics_warned: set[str] = set()
         self._api = airstage_api.ApiLocal(
             session=session,
             retry=polling.retries,
@@ -182,13 +188,34 @@ class PyairstageLocalUnit:
             pass
 
         for raw_name, field in self._RAW_TO_STATE.items():
+            if field in self._CONFIGURABLE_DIAGNOSTICS and field not in self.config.diagnostics:
+                continue
             value = raw.get(raw_name)
-            if value is not None and str(value) != constants.CAPABILITY_NOT_AVAILABLE:
+            unavailable = (
+                value is None
+                or not str(value).strip()
+                or str(value).strip() == constants.CAPABILITY_NOT_AVAILABLE
+            )
+            if not unavailable:
                 state[field] = _raw_number(value)
+            elif field in self.config.diagnostics:
+                warned: set[str] = getattr(self, "_missing_diagnostics_warned", set())
+                if field not in warned:
+                    _LOGGER.warning(
+                        "Configured diagnostic %s is not currently reported by %s",
+                        field,
+                        self.config.name,
+                    )
+                    warned.add(field)
+                    self._missing_diagnostics_warned = warned
 
         model = str(device.get("model") or raw.get(constants.ACParameter.MODEL.value) or "AirStage")
         state["model"] = model
-        return DeviceSnapshot(state=state, capabilities=frozenset(state), model=model)
+        capabilities: set[str] = getattr(self, "_capabilities", set())
+        capabilities.update(state)
+        capabilities.update(self.config.diagnostics)
+        self._capabilities = capabilities
+        return DeviceSnapshot(state=state, capabilities=frozenset(capabilities), model=model)
 
     async def apply(self, command: dict[str, object], current: DeviceSnapshot | None) -> None:
         if not command:

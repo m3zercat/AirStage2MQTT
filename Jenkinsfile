@@ -185,6 +185,9 @@ pipeline {
                         echo "    ip: $unit_ip"
                         echo '    use_https: false'
                         echo '    turn_on_before_set_temperature: true'
+                        echo '    diagnostics:'
+                        echo '      enabled:'
+                        echo '        - error_code'
                         echo '  - name: offline_unit'
                         echo '    mac: E8FB1C000001'
                         echo '    ip: 192.0.2.1'
@@ -240,12 +243,18 @@ pipeline {
                     done
                     printf '%s\n' "$initial_state" | grep -F '"state":"ON"'
                     printf '%s\n' "$initial_state" | grep -F '"current_temperature":21.5'
+                    printf '%s\n' "$initial_state" | grep -F '"error_code":0'
+                    ! printf '%s\n' "$initial_state" | grep -Fq '"demand"'
+                    ! printf '%s\n' "$initial_state" | grep -Fq '"power_consumption"'
                     test "$(read_retained airstage2mqtt/test_unit/availability)" = online
                     test "$(read_retained airstage2mqtt/offline_unit/availability)" = offline
 
                     discovery=$(read_retained homeassistant/device/airstage2mqtt_e8fb1c000000/config)
                     printf '%s\n' "$discovery" | grep -F '"platform":"climate"'
                     printf '%s\n' "$discovery" | grep -F '"platform":"switch"'
+                    printf '%s\n' "$discovery" | grep -F '"error_code"'
+                    ! printf '%s\n' "$discovery" | grep -Fq '"demand"'
+                    ! printf '%s\n' "$discovery" | grep -Fq '"power_consumption"'
                     manifest=$(read_retained airstage2mqtt/manifests/jenkinsci0001)
                     printf '%s\n' "$manifest" | grep -F '"bridge_key":"jenkinsci0001"'
                     printf '%s\n' "$manifest" | grep -F '"airstage2mqtt/test_unit"'

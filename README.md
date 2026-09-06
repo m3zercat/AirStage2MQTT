@@ -109,6 +109,8 @@ units:
     ip: "192.168.1.40"
     use_https: false
     turn_on_before_set_temperature: false
+    diagnostics:
+      enabled: []
 
   - name: bedroom
     friendly_name: Main Bedroom Air Conditioner
@@ -116,6 +118,9 @@ units:
     ip: "192.168.1.41"
     use_https: false
     turn_on_before_set_temperature: true
+    diagnostics:
+      enabled:
+        - error_code
 ```
 
 `bridge.key` is a required, stable ownership identifier containing 8-64 letters, digits,
@@ -131,6 +136,13 @@ must also be unique between bridge instances that share the same base topic.
 `turn_on_before_set_temperature` controls whether a temperature command
 automatically powers on an off unit or is rejected. `mqtt.base_topic` controls the shared
 operational MQTT topic prefix; it must not contain MQTT wildcards.
+
+`diagnostics.enabled` is an optional per-unit list containing `error_code`, `demand`, and/or
+`power_consumption`. If `diagnostics`, `enabled`, or the list itself is omitted or empty, all
+three are disabled. Disabled diagnostics are omitted from both MQTT state and Home Assistant
+discovery. Unknown names are configuration errors. Enabled diagnostics are discovered as active
+diagnostic entities; a blank or Fujitsu `65535` unsupported value is omitted from state and
+logged once instead of being published as a reading.
 
 The following connection settings may alternatively be placed under the `mqtt:` mapping: `host`,
 `port`, `username`, `password`, `password_file`, `tls`, `tls_ca_file`, and `tls_insecure`.
@@ -152,7 +164,7 @@ For a unit named `living_room` and the default base topic:
 | `airstage2mqtt/living_room/set/<property>` | client → bridge | no | Single-property command |
 | `airstage2mqtt/living_room/get` | client → bridge | no | Request an immediate refresh |
 | `airstage2mqtt/living_room/availability` | bridge → broker | yes | `online` or `offline` |
-| `airstage2mqtt/bridges/<key>/state` | bridge → broker | yes | Key-scoped status and MQTT last will |
+| `airstage2mqtt/bridges/<key>/state` | bridge → broker | yes | `initializing`, `online`, or last-will `offline` |
 | `airstage2mqtt/bridges/<key>/info` | bridge → broker | yes | Version and sanitized device metadata |
 | `airstage2mqtt/manifests/<key>` | bridge → broker | yes | Topics owned by this bridge instance |
 
@@ -182,6 +194,11 @@ Request a refresh:
 mosquitto_pub -h MQTT_HOST -t 'airstage2mqtt/living_room/get' -n
 ```
 
+The retained unit JSON and bridge information are published after connection and then only when
+their normalized content changes. Polling still occurs at the configured interval: suppressing
+unchanged MQTT messages does not reduce hardware monitoring. Availability is likewise published
+on transitions rather than on every poll.
+
 ### Properties
 
 Writable properties are published only when supported by the unit:
@@ -202,10 +219,19 @@ Writable properties are published only when supported by the unit:
 | `human_detection_auto_save` | `ON` or `OFF` |
 
 Read-only state may also include `current_temperature`, `outdoor_temperature`,
-`human_detection`, `power_consumption`, `demand`, `error_code`, `filter_sign_reset`, and `model`.
+`human_detection`, `filter_sign_reset`, and `model`. When enabled for that unit, it may also
+include `power_consumption`, `demand`, and `error_code`.
 Unknown, read-only, or unsupported commands are rejected and logged without affecting other
 units. Medium-low and medium-high fan states can be reported by some units but cannot be written
 through `pyairstage`.
+
+The three configurable diagnostics expose raw, model-dependent local API fields:
+
+- `error_code` is the unit's raw fault code; `0` normally means no reported fault.
+- `demand` is a raw demand/capacity-control value and should not be interpreted as a reliable
+  compressor-running indicator.
+- `power_consumption` is not available on every model, and AirStage2MQTT deliberately assigns no
+  power/energy unit or Home Assistant device class until its meaning can be validated by model.
 
 ## Home Assistant
 
@@ -215,11 +241,21 @@ AirStage2MQTT publishes one retained MQTT device-discovery document containing:
 
 - A primary climate entity.
 - Indoor and outdoor temperature sensors when supported.
-- Capability-dependent control switches and diagnostic sensors.
+- Capability-dependent control switches and explicitly enabled diagnostic sensors.
 - Bridge and per-unit availability.
 
-Discovery is republished when Home Assistant publishes its birth message to
-`homeassistant/status` and after every bridge MQTT reconnection.
+Discovery is retained and published once after every bridge MQTT connection. Home Assistant birth
+messages are also handled, but an identical discovery document is not republished repeatedly
+during the same MQTT session. A transiently missing value cannot remove a previously established
+capability from discovery. When a configured diagnostic is disabled, AirStage2MQTT uses Home
+Assistant's explicit component-removal update before publishing the final device document.
+
+At startup, the bridge publishes `initializing`, polls all units concurrently, and publishes each
+unit's current state and availability. Only after every unit has either responded or exhausted
+its configured local API retries does the bridge publish `online`. Home Assistant treats every
+bridge state other than `online` as unavailable, so it cannot briefly expose stale per-unit
+availability while startup is still in progress. A genuinely unreachable unit does not prevent
+reachable units or the bridge from starting.
 
 ### Ownership manifest
 
@@ -238,9 +274,11 @@ topics are ignored and cleared rather than executed after a restart.
 ### `/data` persistence
 
 The `/data` volume contains one small fallback file, `homeassistant-discovery.json`. It records
-discovery topics and their normalized device IDs so the bridge can remove stale discovery when a
-broker manifest is missing or `mqtt.base_topic` changes. It contains no MQTT credentials, A/C
-state history, or command history.
+discovery topics, normalized device IDs, and the last discovery document. This lets the bridge
+remove stale discovery when a broker manifest is missing or `mqtt.base_topic` changes, preserve a
+stable entity schema across transient partial device responses, and explicitly remove diagnostics
+disabled in configuration. It contains no MQTT credentials, A/C state history, readings, or
+command history.
 
 Persisting `/data` remains recommended when Home Assistant discovery is enabled, although the
 broker manifest handles normal cleanup for a stable base topic. If discovery will always remain

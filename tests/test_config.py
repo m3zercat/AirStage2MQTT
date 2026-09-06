@@ -79,6 +79,44 @@ def test_derives_friendly_name_from_topic_name(tmp_path: Path) -> None:
     assert config.units[0].display_name == "Living Room"
 
 
+def test_diagnostics_are_disabled_by_default(tmp_path: Path) -> None:
+    config = load_config(write_config(tmp_path), environ={"A2M_MQTT_HOST": "broker"})
+
+    assert config.units[0].diagnostics == frozenset()
+
+
+def test_loads_enabled_diagnostics_per_unit(tmp_path: Path) -> None:
+    content = BASE_CONFIG.replace(
+        '    ip: "192.168.1.40"',
+        '    ip: "192.168.1.40"\n'
+        "    diagnostics:\n"
+        "      enabled:\n"
+        "        - error_code\n"
+        "        - demand",
+    )
+
+    config = load_config(write_config(tmp_path, content), environ={"A2M_MQTT_HOST": "broker"})
+
+    assert config.units[0].diagnostics == frozenset({"error_code", "demand"})
+
+
+@pytest.mark.parametrize(
+    ("diagnostics_yaml", "message"),
+    [
+        ("      enabled: error_code", "must be a list"),
+        ("      enabled:\n        - made_up", "unknown diagnostic"),
+    ],
+)
+def test_rejects_invalid_diagnostics(tmp_path: Path, diagnostics_yaml: str, message: str) -> None:
+    content = BASE_CONFIG.replace(
+        '    ip: "192.168.1.40"',
+        f'    ip: "192.168.1.40"\n    diagnostics:\n{diagnostics_yaml}',
+    )
+
+    with pytest.raises(ConfigurationError, match=message):
+        load_config(write_config(tmp_path, content), environ={"A2M_MQTT_HOST": "broker"})
+
+
 @pytest.mark.parametrize(
     ("mac", "expected"),
     [

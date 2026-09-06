@@ -17,6 +17,7 @@ _NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _BRIDGE_KEY_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
 _MAC_RE = re.compile(r"^[0-9A-F]{12}$")
 _RESERVED_UNIT_NAMES = {"bridge", "bridges", "manifests"}
+DIAGNOSTIC_FIELDS = frozenset({"demand", "error_code", "power_consumption"})
 
 
 class ConfigurationError(ValueError):
@@ -61,6 +62,7 @@ class UnitConfig:
     use_https: bool = False
     turn_on_before_set_temperature: bool = False
     friendly_name: str | None = None
+    diagnostics: frozenset[str] = frozenset()
 
     @property
     def device_id(self) -> str:
@@ -292,6 +294,18 @@ def load_config(
             raise ConfigurationError(f"duplicate unit MAC: {mac}")
         if ip in ips:
             raise ConfigurationError(f"duplicate unit IP: {ip}")
+        diagnostics_raw = _mapping(unit_raw.get("diagnostics"), f"{name}.diagnostics")
+        enabled_diagnostics_raw = diagnostics_raw.get("enabled", [])
+        if enabled_diagnostics_raw is None:
+            enabled_diagnostics_raw = []
+        if not isinstance(enabled_diagnostics_raw, list):
+            raise ConfigurationError(f"{name}.diagnostics.enabled must be a list")
+        enabled_diagnostics = frozenset(str(value).strip() for value in enabled_diagnostics_raw)
+        unknown_diagnostics = enabled_diagnostics - DIAGNOSTIC_FIELDS
+        if unknown_diagnostics:
+            raise ConfigurationError(
+                f"unknown diagnostic for {name}: {', '.join(sorted(unknown_diagnostics))}"
+            )
         names.add(name)
         macs.add(mac)
         ips.add(ip)
@@ -306,6 +320,7 @@ def load_config(
                     f"{name}.turn_on_before_set_temperature",
                 ),
                 friendly_name=_optional_string(unit_raw.get("friendly_name")),
+                diagnostics=enabled_diagnostics,
             )
         )
 

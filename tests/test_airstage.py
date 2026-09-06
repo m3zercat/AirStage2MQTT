@@ -46,6 +46,12 @@ def test_normalizes_pyairstage_snapshot() -> None:
     }
     ac = AirstageAC(DEVICE_ID, object()).refresh_parameters(data=device)  # type: ignore[arg-type]
     adapter = object.__new__(PyairstageLocalUnit)
+    adapter.config = UnitConfig(
+        "living_room",
+        DEVICE_ID,
+        "192.168.1.40",
+        diagnostics=frozenset({"power_consumption", "error_code", "demand"}),
+    )
 
     snapshot = adapter._snapshot(ac, device)
 
@@ -60,6 +66,70 @@ def test_normalizes_pyairstage_snapshot() -> None:
     assert snapshot.state["economy"] == "ON"
     assert snapshot.state["power_consumption"] == 123
     assert "outdoor_low_noise" not in snapshot.state
+
+
+def test_omits_diagnostics_unless_enabled_and_ignores_blank_values() -> None:
+    device: dict[str, Any] = {
+        "deviceId": DEVICE_ID,
+        "model": "ASYG",
+        "parameters": [
+            parameter("iu_onoff", 1),
+            parameter("iu_op_mode", 1),
+            parameter("iu_fan_spd", 8),
+            parameter("iu_err_code", 0),
+            parameter("iu_demand", 65535),
+            parameter("iu_pow_cons", ""),
+        ],
+    }
+    ac = AirstageAC(DEVICE_ID, object()).refresh_parameters(data=device)  # type: ignore[arg-type]
+
+    disabled = object.__new__(PyairstageLocalUnit)
+    disabled.config = UnitConfig("living_room", DEVICE_ID, "192.168.1.40")
+    disabled_snapshot = disabled._snapshot(ac, device)
+    assert not {"error_code", "demand", "power_consumption"} & set(disabled_snapshot.state)
+
+    enabled = object.__new__(PyairstageLocalUnit)
+    enabled.config = UnitConfig(
+        "living_room",
+        DEVICE_ID,
+        "192.168.1.40",
+        diagnostics=frozenset({"error_code", "demand", "power_consumption"}),
+    )
+    enabled_snapshot = enabled._snapshot(ac, device)
+
+    assert enabled_snapshot.state["error_code"] == 0
+    assert "demand" not in enabled_snapshot.state
+    assert "power_consumption" not in enabled_snapshot.state
+    assert {"error_code", "demand", "power_consumption"} <= enabled_snapshot.capabilities
+
+
+def test_capabilities_do_not_shrink_when_a_later_response_omits_a_field() -> None:
+    common = [
+        parameter("iu_onoff", 1),
+        parameter("iu_op_mode", 1),
+        parameter("iu_fan_spd", 8),
+    ]
+    complete: dict[str, Any] = {
+        "deviceId": DEVICE_ID,
+        "model": "ASYG",
+        "parameters": [*common, parameter("iu_economy", 1)],
+    }
+    partial: dict[str, Any] = {
+        "deviceId": DEVICE_ID,
+        "model": "ASYG",
+        "parameters": common,
+    }
+    adapter = object.__new__(PyairstageLocalUnit)
+    adapter.config = UnitConfig("living_room", DEVICE_ID, "192.168.1.40")
+
+    complete_ac = AirstageAC(DEVICE_ID, object()).refresh_parameters(data=complete)  # type: ignore[arg-type]
+    first = adapter._snapshot(complete_ac, complete)
+    partial_ac = AirstageAC(DEVICE_ID, object()).refresh_parameters(data=partial)  # type: ignore[arg-type]
+    second = adapter._snapshot(partial_ac, partial)
+
+    assert "economy" in first.capabilities
+    assert "economy" not in second.state
+    assert "economy" in second.capabilities
 
 
 class FakeAc:
